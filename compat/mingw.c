@@ -1,3 +1,4 @@
+#define __XUTF8_INIT__ /* For UTF-8. Added by Sprite Tong, 12/1/2011. */
 #include "../git-compat-util.h"
 #include "win32.h"
 #include <conio.h>
@@ -200,7 +201,9 @@ static int ask_yes_no_if_possible(const char *format, ...)
 	}
 }
 
+#ifndef __XUTF8_ENABLED__ /* For UTF-8. Changed by Sprite Tong, 12/1/2011. */
 #undef unlink
+#endif
 int mingw_unlink(const char *pathname)
 {
 	int ret, tries = 0;
@@ -251,7 +254,9 @@ static int is_dir_empty(const char *path)
 	return 0;
 }
 
+#ifndef __XUTF8_ENABLED__ /* For UTF-8. Changed by Sprite Tong, 12/1/2011. */
 #undef rmdir
+#endif
 int mingw_rmdir(const char *pathname)
 {
 	int ret, tries = 0;
@@ -300,7 +305,9 @@ void mingw_mark_as_git_dir(const char *dir)
 		 "dotGitOnly" : "true"));
 }
 
+#ifndef __XUTF8_ENABLED__ /* For UTF-8. Changed by Sprite Tong, 12/1/2011. */
 #undef mkdir
+#endif
 int mingw_mkdir(const char *path, int mode)
 {
 	int ret = mkdir(path);
@@ -317,7 +324,9 @@ int mingw_mkdir(const char *path, int mode)
 	return ret;
 }
 
+#ifndef __XUTF8_ENABLED__ /* For UTF-8. Changed by Sprite Tong, 12/1/2011. */
 #undef open
+#endif
 int mingw_open (const char *filename, int oflags, ...)
 {
 	va_list args;
@@ -369,7 +378,9 @@ ssize_t mingw_write(int fd, const void *buf, size_t count)
 	return write(fd, buf, min(count, 31 * 1024 * 1024));
 }
 
+#ifndef __XUTF8_ENABLED__ /* For UTF-8. Changed by Sprite Tong, 12/1/2011. */
 #undef fopen
+#endif
 FILE *mingw_fopen (const char *filename, const char *otype)
 {
 	int hide = 0;
@@ -385,7 +396,9 @@ FILE *mingw_fopen (const char *filename, const char *otype)
 	return file;
 }
 
+#ifndef __XUTF8_ENABLED__ /* For UTF-8. Changed by Sprite Tong, 12/1/2011. */
 #undef freopen
+#endif
 FILE *mingw_freopen (const char *filename, const char *otype, FILE *stream)
 {
 	int hide = 0;
@@ -652,7 +665,9 @@ struct tm *localtime_r(const time_t *timep, struct tm *result)
 	return result;
 }
 
+#ifndef __XUTF8_ENABLED__ /* For UTF-8. Changed by Sprite Tong, 12/1/2011. */
 #undef getcwd
+#endif
 char *mingw_getcwd(char *pointer, int len)
 {
 	int i;
@@ -726,7 +741,7 @@ static const char *quote_arg(const char *arg)
 
 static const char *parse_interpreter(const char *cmd)
 {
-	static char buf[100];
+	char buf[100]; /* Remove "static". Changed by Sprite Tong, 12/1/2011. */
 	char *p, *opt;
 	int n, fd;
 
@@ -1181,7 +1196,9 @@ char **make_augmented_environ(const char *const *vars)
 	return env;
 }
 
+#ifndef __XUTF8_ENABLED__ /* For UTF-8. Changed by Sprite Tong, 12/1/2011. */
 #undef getenv
+#endif
 
 /*
  * The system's getenv looks up the name in a case-insensitive manner.
@@ -1507,7 +1524,9 @@ int mingw_accept(int sockfd1, struct sockaddr *sa, socklen_t *sz)
 	return sockfd2;
 }
 
+#ifndef __XUTF8_ENABLED__ /* For UTF-8. Changed by Sprite Tong, 12/1/2011. */
 #undef rename
+#endif
 int mingw_rename(const char *pold, const char *pnew)
 {
 	DWORD attrs, gle;
@@ -1895,4 +1914,8 @@ void mingw_startup()
 	_setmode(_fileno(stdin), _O_BINARY);
 	_setmode(_fileno(stdout), _O_BINARY);
 	_setmode(_fileno(stderr), _O_BINARY);
+
+	/* For UTF-8. Added by Sprite Tong, 12/1/2011. */
+	xutf8_startup(__argc, __argv);
 }
+

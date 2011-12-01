@@ -5,6 +5,7 @@
 #ifndef WIN32         /* Not defined by Cygwin */
 #include <windows.h>
 #endif
+#include "win32_xutf8.h" /* For UTF-8. Added by Sprite Tong, 12/1/2011. */
 
 static inline int file_attr_to_st_mode (DWORD attr)
 {

@@ -1,4 +1,5 @@
 #include "../../git-compat-util.h"
+#include "../win32.h" /* For UTF-8. Added by Sprite Tong, 12/1/2011. */
 
 struct DIR {
 	struct dirent dd_dir; /* includes d_type */
