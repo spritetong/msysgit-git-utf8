@@ -38,31 +38,31 @@ extern char *_xutf8_w2a_alloc(unsigned codepage, const wchar_t *src);
 
 /******************************************************************************/
 
-WINBASEAPI HANDLE WINAPI xutf8_FindFirstFileA(LPCSTR,LPWIN32_FIND_DATAA);
+HANDLE WINAPI xutf8_FindFirstFileA(LPCSTR,LPWIN32_FIND_DATAA);
 #define FindFirstFileA xutf8_FindFirstFileA
 
-WINBASEAPI BOOL WINAPI xutf8_FindNextFileA(HANDLE,LPWIN32_FIND_DATAA);
+BOOL WINAPI xutf8_FindNextFileA(HANDLE,LPWIN32_FIND_DATAA);
 #define FindNextFileA xutf8_FindNextFileA
 
-WINBASEAPI BOOL WINAPI xutf8_GetFileAttributesExA(LPCSTR,GET_FILEEX_INFO_LEVELS,PVOID);
+BOOL WINAPI xutf8_GetFileAttributesExA(LPCSTR,GET_FILEEX_INFO_LEVELS,PVOID);
 #define GetFileAttributesExA xutf8_GetFileAttributesExA
 
-WINBASEAPI DWORD WINAPI xutf8_GetFileAttributesA(LPCSTR);
+DWORD WINAPI xutf8_GetFileAttributesA(LPCSTR);
 #define GetFileAttributesA xutf8_GetFileAttributesA
 
-WINBASEAPI BOOL WINAPI xutf8_SetFileAttributesA(LPCSTR,DWORD);
+BOOL WINAPI xutf8_SetFileAttributesA(LPCSTR,DWORD);
 #define SetFileAttributesA xutf8_SetFileAttributesA
 
-WINBASEAPI BOOL WINAPI xutf8_MoveFileExA(LPCSTR,LPCSTR,DWORD);
+BOOL WINAPI xutf8_MoveFileExA(LPCSTR,LPCSTR,DWORD);
 #define MoveFileExA xutf8_MoveFileExA
 
-WINBASEAPI HANDLE WINAPI xutf8_CreateFileA(LPCSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,DWORD,DWORD,HANDLE);
+HANDLE WINAPI xutf8_CreateFileA(LPCSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,DWORD,DWORD,HANDLE);
 #define CreateFileA xutf8_CreateFileA
 
-WINBASEAPI int WINAPI xutf8_CreateHardLinkA(LPCSTR,LPCSTR,LPSECURITY_ATTRIBUTES);
+int WINAPI xutf8_CreateHardLinkA(LPCSTR,LPCSTR,LPSECURITY_ATTRIBUTES);
 #define CreateHardLinkA xutf8_CreateHardLinkA
 
-WINBASEAPI BOOL WINAPI xutf8_CreateProcessA(LPCSTR,LPSTR,LPSECURITY_ATTRIBUTES,
+BOOL WINAPI xutf8_CreateProcessA(LPCSTR,LPSTR,LPSECURITY_ATTRIBUTES,
 	LPSECURITY_ATTRIBUTES,BOOL,DWORD,PVOID,LPCSTR,LPSTARTUPINFOA,LPPROCESS_INFORMATION);
 #define CreateProcessA xutf8_CreateProcessA
 
