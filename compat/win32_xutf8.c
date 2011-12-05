@@ -17,10 +17,11 @@ wchar_t *_xutf8_a2w(unsigned codepage, const char *src, wchar_t *dst, int dst_le
 
 	if (src)
 	{
-		len = MultiByteToWideChar(codepage, 0, src, -1, dst, dst_len - 1);
+		len = MultiByteToWideChar(codepage, 0, src, -1, dst, dst_len);
 		if (len >= 0)
 		{
-			dst[len] = '\0';
+			if (len >= dst_len)
+				dst[dst_len - 1] = '\0';
 			return dst;
 		}
 	}
@@ -37,10 +38,11 @@ char *_xutf8_w2a(unsigned codepage, const wchar_t *src, char *dst, int dst_len)
 
 	if (src)
 	{
-		len = WideCharToMultiByte(codepage, 0, src, -1, dst, dst_len - 1, NULL, NULL);
+		len = WideCharToMultiByte(codepage, 0, src, -1, dst, dst_len, NULL, NULL);
 		if (len >= 0)
 		{
-			dst[len] = '\0';
+			if (len >= dst_len)
+				dst[dst_len - 1] = '\0';
 			return dst;
 		}
 	}
@@ -82,7 +84,7 @@ char *_xutf8_w2a_alloc(unsigned codepage, const wchar_t *src)
 			dst = (char *)xmalloc((len + 1) * sizeof(char));
 			if (dst)
 			{
-				len = WideCharToMultiByte(codepage, 0, src, -1, dst, len, NULL, NULL);
+				len = WideCharToMultiByte(codepage, 0, src, -1, dst, len + 1, NULL, NULL);
 				dst[len] = '\0';
 			}
 		}
@@ -622,10 +624,15 @@ char *xutf8_getcwd(char *pointer, int len)
 	return _xutf8_w2a(_XUTF8_CODEPAGE, ret, pointer, len);
 }
 
+#undef getenv
 char *xutf8_getenv(const char *name)
 {
-	return _xutf8_getenv(&_xutf8_environ, name);
+	if (!_xutf8_environ.env)
+		mingw_environ();
+	return _xutf8_environ.env ?
+		_xutf8_getenv(&_xutf8_environ, name) : getenv(name);
 }
+#define getenv xutf8_getenv
 
 int xutf8_rename(const char *pold, const char *pnew)
 {
@@ -660,19 +667,27 @@ static void xutf8_startup(int argc, char **argv)
 		argv[i] = xstrdup("");
 	LocalFree(wargv);
 
-	/* Create an UTF-8 environment block. */
-	_wgetenv(L"PATH");
-	_xutf8_clonewenv(&_xutf8_environ, _wenviron);
+	/* Initialize UTF-8 environment control block. */
+	mingw_environ();
 }
 
 int mingw_putenv(const char *envstring)
 {
-	return _xutf8_putenv(&_xutf8_environ, envstring);
+	if (!_xutf8_environ.env)
+		mingw_environ();
+	return _xutf8_environ.env ?
+		_xutf8_putenv(&_xutf8_environ, envstring) : _putenv(envstring);
 }
 
 char **mingw_environ(void)
 {
-	return _xutf8_environ.env;
+	if (!_xutf8_environ.env)
+	{
+		/* Duplicate an UTF-8 environment block. */
+		_wgetenv(L"PATH");
+		_xutf8_clonewenv(&_xutf8_environ, _wenviron);		
+	}
+	return _xutf8_environ.env ? _xutf8_environ.env : _environ;
 }
 
 int mingw_chmod(const char *filename, int pmode)
@@ -700,6 +715,7 @@ int mkstemp(char *template)
 	filename = _wmktemp(_xutf82w(template, wstr1));
 	if (filename == NULL)
 		return -1;
+	_xutf8_w2a(_XUTF8_CODEPAGE, filename, template, strlen(template) + 1);
 	return _wopen(filename, O_RDWR | O_CREAT, 0600);
 }
 #define mkstemp _mkstemp_dummy
