@@ -53,6 +53,10 @@ interactive)
 	rebase=$(git config --bool branch.$curr_branch_short.rebase)
 	;;
 esac
+if test -z "$rebase"
+then
+	rebase=$(git config --bool pull.rebase)
+fi
 dry_run=
 while :
 do

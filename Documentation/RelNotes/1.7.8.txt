@@ -1,5 +1,5 @@
-Git v1.7.8 Release Notes (draft)
-================================
+Git v1.7.8 Release Notes
+========================
 
 Updates since v1.7.7
 --------------------
@@ -29,7 +29,7 @@ Updates since v1.7.7
    files from the index, not from the working tree.
 
  * Variants of "git cherry-pick" and "git revert" that take multiple
-   commits learned to "--continue".
+   commits learned to "--continue" and "--abort".
 
  * "git daemon" gives more human readble error messages to clients
    using ERR packets when appropriate.
@@ -113,9 +113,6 @@ Updates since v1.7.7
    between commits in the superproject that has and does not have the
    submodule in the tree without re-cloning.
 
- * "git upload-archive" (hence "git archive --remote") can be built
-   and used on mingw port of Git.
-
  * "gitweb" leaked unescaped control characters from syntax hiliter
    outputs.
 
@@ -139,11 +136,9 @@ included in this release.
    credentials.
    (merge deba493 jk/http-auth later to maint).
 
- * "git branch -m/-M" advertised to update RENAME_REF ref in the
-   commit log message that introduced the feature but not anywhere in
-   the documentation, and never did update such a ref anyway. This
-   undocumented misfeature that did not exist has been excised.
-   (merge b0eab01 jc/maint-remove-renamed-ref later to maint).
+ * "git blame" was aborted if started from an uncommitted content and
+   the path had the textconv filter in effect.
+   (merge 8518088 ss/blame-textconv-fake-working-tree later to maint).
 
  * Adding many refs to the local repository in one go (e.g. "git fetch"
    that fetches many tags) and looking up a ref by name in a repository
@@ -160,18 +155,7 @@ included in this release.
    hooks for attempted removal of non-existing refs.
    (merge 160b81ed ph/push-to-delete-nothing later to maint).
 
- * The logic to filter out forked projects in the project list in
-   "gitweb" was broken for some time.
-   (merge 53c632f jm/maint-gitweb-filter-forks-fix later to maint).
-
- * The logic to optimize the locality of the data in a pack introduced in
-   1.7.7 was grossly inefficient.
-   (merge 38d4deb dm/pack-objects-update later to maint).
-
----
-exec >/var/tmp/1
-O=v1.7.8-rc0-32-g8e3565f
-echo O=$(git describe --always master)
-git log --first-parent --oneline --reverse ^$O master
-echo
-git shortlog --no-merges ^$O master
+ * Help text for "git remote set-url" and "git remote set-branches"
+   were misspelled.
+   (merge c49904e fc/remote-seturl-usage-fix later to maint).
+   (merge 656cdf0 jc/remote-setbranches-usage-fix later to maint).

@@ -12,7 +12,7 @@ test_description='Test interaction of reset --hard with sequencer
 . ./test-lib.sh
 
 pristine_detach () {
-	git cherry-pick --reset &&
+	git cherry-pick --quit &&
 	git checkout -f "$1^0" &&
 	git read-tree -u --reset HEAD &&
 	git clean -d -f -f -q -x
@@ -38,6 +38,14 @@ test_expect_success 'reset --hard cleans up sequencer state, providing one-level
 	test_path_is_missing .git/sequencer &&
 	test_path_is_dir .git/sequencer-old &&
 	git reset --hard &&
+	test_path_is_missing .git/sequencer-old
+'
+
+test_expect_success 'cherry-pick --abort does not leave sequencer-old dir' '
+	pristine_detach initial &&
+	test_must_fail git cherry-pick base..anotherpick &&
+	git cherry-pick --abort &&
+	test_path_is_missing .git/sequencer &&
 	test_path_is_missing .git/sequencer-old
 '
 

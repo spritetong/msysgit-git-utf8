@@ -115,8 +115,10 @@ static int branch_merged(int kind, const char *name,
 		    branch->merge[0] &&
 		    branch->merge[0]->dst &&
 		    (reference_name =
-		     resolve_ref(branch->merge[0]->dst, sha1, 1, NULL)) != NULL)
+		     resolve_ref(branch->merge[0]->dst, sha1, 1, NULL)) != NULL) {
+			reference_name = xstrdup(reference_name);
 			reference_rev = lookup_commit_reference(sha1);
+		}
 	}
 	if (!reference_rev)
 		reference_rev = head_rev;
@@ -141,6 +143,7 @@ static int branch_merged(int kind, const char *name,
 				"         '%s', even though it is merged to HEAD."),
 				name, reference_name);
 	}
+	free((char*)reference_name);
 	return merged;
 }
 
@@ -186,7 +189,7 @@ static int delete_branches(int argc, const char **argv, int force, int kinds)
 		free(name);
 
 		name = xstrdup(mkpath(fmt, bname.buf));
-		if (!resolve_ref(name, sha1, 1, NULL)) {
+		if (read_ref(name, sha1)) {
 			error(_("%sbranch '%s' not found."),
 					remote, bname.buf);
 			ret = 1;
@@ -565,7 +568,6 @@ static int print_ref_list(int kinds, int detached, int verbose, int abbrev, stru
 static void rename_branch(const char *oldname, const char *newname, int force)
 {
 	struct strbuf oldref = STRBUF_INIT, newref = STRBUF_INIT, logmsg = STRBUF_INIT;
-	unsigned char sha1[20];
 	struct strbuf oldsection = STRBUF_INIT, newsection = STRBUF_INIT;
 	int recovery = 0;
 
@@ -577,7 +579,7 @@ static void rename_branch(const char *oldname, const char *newname, int force)
 		 * Bad name --- this could be an attempt to rename a
 		 * ref that we used to allow to be created by accident.
 		 */
-		if (resolve_ref(oldref.buf, sha1, 1, NULL))
+		if (ref_exists(oldref.buf))
 			recovery = 1;
 		else
 			die(_("Invalid branch name: '%s'"), oldname);
@@ -745,7 +747,7 @@ int cmd_branch(int argc, const char **argv, const char *prefix)
 	argc = parse_options(argc, argv, prefix, options, builtin_branch_usage,
 			     0);
 
-	if (!delete && !rename && !force_create && !edit_description && argc == 0)
+	if (!delete && !rename && !edit_description && argc == 0)
 		list = 1;
 
 	if (!!delete + !!rename + !!force_create + !!list > 1)
@@ -778,7 +780,7 @@ int cmd_branch(int argc, const char **argv, const char *prefix)
 			rename_branch(argv[0], argv[1], rename > 1);
 		else
 			usage_with_options(builtin_branch_usage, options);
-	} else if (argc <= 2) {
+	} else if (argc > 0 && argc <= 2) {
 		if (kinds != REF_LOCAL_BRANCH)
 			die(_("-a and -r options to 'git branch' do not make sense with a branch name"));
 		create_branch(head, argv[0], (argc == 2) ? argv[1] : head,
