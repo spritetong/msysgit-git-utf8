@@ -188,7 +188,7 @@ static int write_zip_entry(struct archiver_args *args,
 	copy_le16(dirent.creator_version,
 		S_ISLNK(mode) || (S_ISREG(mode) && (mode & 0111)) ? 0x0317 : 0);
 	copy_le16(dirent.version, 10);
-	copy_le16(dirent.flags, 0);
+	copy_le16(dirent.flags, (1 << 11)); /* For UTF-8. Changed by Sprite Tong, 12/7/2011. */
 	copy_le16(dirent.compression_method, method);
 	copy_le16(dirent.mtime, zip_time);
 	copy_le16(dirent.mdate, zip_date);
@@ -210,7 +210,7 @@ static int write_zip_entry(struct archiver_args *args,
 
 	copy_le32(header.magic, 0x04034b50);
 	copy_le16(header.version, 10);
-	copy_le16(header.flags, 0);
+	copy_le16(header.flags, (1 << 11)); /* For UTF-8. Changed by Sprite Tong, 12/7/2011. */
 	copy_le16(header.compression_method, method);
 	copy_le16(header.mtime, zip_time);
 	copy_le16(header.mdate, zip_date);
