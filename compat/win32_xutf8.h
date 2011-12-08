@@ -26,6 +26,7 @@ extern "C" {
 
 #define _XUTF8_DEFEVNNUM	512
 #define _XUTF8_DEFEVNVAL	256
+#define _XUTF8_EVNPOOLSIZE	65536
 #define _XUTF8_CODEPAGE		CP_UTF8
 
 extern wchar_t *_xutf8_a2w(unsigned codepage, const char *src, wchar_t *dst, int dst_len);

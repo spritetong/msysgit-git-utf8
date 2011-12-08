@@ -5,6 +5,10 @@
 
 #ifdef __XUTF8_ENABLED__
 
+/*******************************************************************************
+ * Charset convertion
+ ******************************************************************************/
+
 #define _xutf82w(src, dst)	_xutf8_a2w(_XUTF8_CODEPAGE, src, dst, ARRAY_SIZE(dst))
 #define _xw2utf8(src, dst)	_xutf8_w2a(_XUTF8_CODEPAGE, src, dst, ARRAY_SIZE(dst))
 
@@ -92,23 +96,288 @@ char *_xutf8_w2a_alloc(unsigned codepage, const wchar_t *src)
 	return dst;
 }
 
-/******************************************************************************/
+/*******************************************************************************
+ * Memory Pool
+ ******************************************************************************/
+
+#define _MEM_ALIGN	(sizeof(void*) * 2)
+#define _MEM_MIN	32
+#define _MEM_FREE	((mem_pool_t *)NULL)
+
+typedef struct _mem_pool_struct  mem_pool_t;
+typedef struct _mem_block_struct mem_block_t;
+
+#define _mem_pool_lock(pool)	(void)0
+#define _mem_pool_unlock(pool)	(void)0
+
+struct _mem_block_struct
+{
+	mem_block_t *next_block;
+	mem_pool_t  *pool_ptr;
+};
+
+struct _mem_pool_struct
+{
+	char		*pool_addr;
+	size_t		pool_size;
+	size_t		free_size;
+	size_t		min_size;
+	size_t		fragment_num;
+	mem_block_t	*search;
+};
+
+void mem_pool_init(mem_pool_t *pool, void *pool_addr, size_t pool_size)
+{
+	char *start, *end;
+	mem_block_t *block;
+	
+	start = (char *)(((size_t)pool_addr + (_MEM_ALIGN - 1)) / _MEM_ALIGN * _MEM_ALIGN);
+	end = (char *)(((size_t)pool_addr + pool_size) / _MEM_ALIGN * _MEM_ALIGN);
+
+	pool->pool_addr = (char *)pool_addr;
+	pool->pool_size = end - start;
+	pool->min_size = (_MEM_MIN + _MEM_ALIGN - 1) / _MEM_ALIGN * _MEM_ALIGN;
+
+	/* Initial pool has two memory block: Head and Tail. */
+	pool->fragment_num = 2;
+	pool->free_size = pool->pool_size - sizeof(mem_block_t);
+
+	block = (mem_block_t *)start;
+	pool->search = block;
+	/* Head is marked as FREE. */
+	block->pool_ptr = _MEM_FREE;
+	/* Head's next block is Tail. */
+	block = block->next_block = (mem_block_t *)end - 1;
+
+	/* Tail's next block is head. */
+	block->next_block = (mem_block_t *)start;
+	/* Tail is marked as ALLOCATED. */
+	block->pool_ptr = pool;
+}
+
+static void *_mem_pool_alloc(mem_pool_t *pool, size_t size)
+{
+	mem_block_t *free, *block;
+	size_t free_size, count;
+
+	/* Adjuct required memory size. */
+	size += sizeof(mem_block_t);
+	size = (size + (_MEM_ALIGN - 1)) / _MEM_ALIGN * _MEM_ALIGN;
+
+	if (size > pool->free_size)
+		return NULL;
+
+	count = pool->fragment_num + 1;
+	block = pool->search;
+	free = NULL;
+	while (count--)
+	{
+		if (block->pool_ptr == _MEM_FREE)
+		{
+			if (free)
+			{
+				/* Merge 2 neighbor unallocated blocks. */
+				free->next_block = block->next_block;
+				pool->fragment_num--;
+			}
+			else
+			{
+				/* Update search pointer. */
+				pool->search = free = block;
+			}
+			free_size = (char *)free->next_block - (char *)free;
+			if (free_size >= size)
+			{
+				if (free_size - size >= pool->min_size)
+				{
+					/* Split into 2 blocks. */
+					pool->fragment_num++;
+					block = (mem_block_t *)((char *)free + size);
+					block->next_block = free->next_block;
+					block->pool_ptr = _MEM_FREE;
+					free->next_block = block;
+				}
+				else
+					size = free_size;
+				/* Save the pool pointer into the block head, so that it is marked as allocated. */
+				free->pool_ptr = pool;
+				/* Update pool info. */
+				pool->free_size -= size;
+				return free + 1;
+			}
+		}
+		else
+		{
+			free = NULL;
+		}
+		block = block->next_block;
+	}
+	return NULL;
+}
+
+void *mem_pool_alloc(mem_pool_t *pool, size_t size)
+{
+	void *ptr = NULL;
+	if (pool)
+	{
+		_mem_pool_lock(pool);
+		ptr = _mem_pool_alloc(pool, size);
+		_mem_pool_unlock(pool);
+	}
+	return ptr;
+}
+
+void mem_pool_free(void *memory)
+{
+	mem_block_t *block = (mem_block_t *)memory;
+	mem_pool_t *pool;
+	if (block)
+	{
+		block--;
+		pool = block->pool_ptr;
+		if ((pool != _MEM_FREE) && (pool != NULL))
+		{
+			_mem_pool_lock(pool);
+
+			/* Mark the memory block as free. */
+			block->pool_ptr = _MEM_FREE;
+			/* Update pool info. */
+			pool->free_size += (char *)block->next_block - (char *)block;
+			pool->search = block;
+
+			_mem_pool_unlock(pool);
+		}
+	}
+}
+
+void *mem_pool_realloc(void *memory, size_t new_size)
+{
+	mem_block_t *block = (mem_block_t *)memory;
+	mem_pool_t *pool;
+	size_t old_size;
+	void *ptr;
+
+	if (block == NULL)
+		return NULL;
+	block--;
+	pool = block->pool_ptr;
+	if ((pool == _MEM_FREE) || (pool == NULL))
+		return NULL;
+
+	_mem_pool_lock(pool);
+
+	old_size = (char *)block->next_block - (char *)memory;
+	if (old_size == new_size)
+	{
+		ptr = memory;
+		goto done;
+	}
+
+	/* Mark the memory block as free. */
+	block->pool_ptr = _MEM_FREE;
+	/* Update pool info. */
+	pool->free_size += (char *)block->next_block - (char *)block;
+
+	/* Decrease the fragment number to prevent from merging this block. */
+	pool->fragment_num--;
+
+	/* Start search from this block. */
+	pool->search = block;
+	/* Allocate memory. */
+	ptr = _mem_pool_alloc(pool, new_size);
+
+	/* Restore the fragment number. */
+	pool->fragment_num++;
+
+	/* If memory pointer is not changed, return directly. */
+	if (ptr == memory)
+		goto done;
+
+	/* No enough memory, we do allocate by the old size.
+	   It is sure to succeed and return the old memory pointer. */
+	if (ptr == NULL)
+	{
+		/* Start search from this block. */
+		pool->search = block;
+		_mem_pool_alloc(pool, old_size)/* == memory */;
+		goto done;
+	}
+
+	/* Another memory block is allocated, so remark the old memory block as allocated. */
+	block->pool_ptr = pool;
+	pool->free_size -= (char *)block->next_block - (char *)block;
+
+done:
+	_mem_pool_unlock(pool);
+	if (ptr != NULL && ptr != memory)
+	{
+		/* Copy data, then free the old memory block. */
+		memcpy(ptr, memory, old_size);
+		mem_pool_free(memory);
+	}
+	return ptr;
+}
+
+/*******************************************************************************
+ * Process Environment
+ ******************************************************************************/
 
 typedef struct _xutf8_env_struct
 {
-	char **env;
-	int avail;
-	int capacity;
+	char	**env;
+	int		avail;
+	int		capacity;
+	int		sem_wait;
+	HANDLE	sem;
 } xutf8_env_t;
 
-typedef struct _xutf8_wenv_struct
-{
-	wchar_t **env;
-	int avail;
-	int capacity;
-} xutf8_wenv_t;
-
 static xutf8_env_t _xutf8_environ;
+static mem_pool_t  _xutf8_pool;
+static char        _xutf8_pool_buffer[_XUTF8_EVNPOOLSIZE];
+
+#define _xutf8_env_malloc(size)		mem_pool_alloc(&_xutf8_pool, size)
+#define _xutf8_env_realloc(p, size)	((p) ? mem_pool_realloc(p, size) : \
+										   mem_pool_alloc(&_xutf8_pool, size))
+#define _xutf8_env_free(p)			mem_pool_free(p)
+
+char **_xutf8_clonewenv(xutf8_env_t *dst, wchar_t **src);
+
+void _xutf8_env_lock(xutf8_env_t *env)
+{
+	static const wchar_t sem_guid[] = L"{196D57D9-0717-4F20-95DD-58D0297A402C}";
+	wchar_t sem_name[sizeof(sem_guid)/sizeof(wchar_t) + 8];
+	HANDLE sem;
+
+	sem = (HANDLE)InterlockedExchangePointer((void **)&env->sem, env->sem);
+	if (sem == NULL)
+	{
+		swprintf(sem_name, L"%s%08X", sem_guid, GetCurrentProcessId());
+		sem = CreateSemaphoreW(NULL, 1, 1, sem_name);
+		if (sem == NULL)
+			return;
+		if (GetLastError() == ERROR_ALREADY_EXISTS)
+			CloseHandle(sem);
+		(void)InterlockedExchangePointer((void **)&env->sem, sem);
+	}
+
+	/* Obtain lock. */
+	WaitForSingleObject(sem, INFINITE);
+
+	if (env->env == NULL)
+	{
+		/* Initialize memory pool and UTF-8 environemnt control block. */
+		mem_pool_init(&_xutf8_pool, _xutf8_pool_buffer, sizeof(_xutf8_pool_buffer));
+		_wgetenv(L"PATH");
+		env->sem_wait++;
+		_xutf8_clonewenv(&_xutf8_environ, _wenviron);
+		env->sem_wait--;
+	}
+}
+
+void _xutf8_env_unlock(xutf8_env_t *env)
+{
+	ReleaseSemaphore(env->sem, 1, NULL);
+}
 
 static char **_xutf8_evn_lookup(char **env, const char *name)
 {
@@ -146,7 +415,7 @@ static char **_xutf8_env_add(xutf8_env_t *env, const char *name, const char *val
 	char **entry, *p;
 	if (env->avail == env->capacity)
 		return NULL;
-	if ((p = (char *)xmalloc(strlen(name) + strlen(value) + 2)) == NULL)
+	if ((p = (char *)_xutf8_env_malloc(strlen(name) + strlen(value) + 2)) == NULL)
 		return NULL;
 	sprintf(p, "%s=%s", name, value);
 	entry = env->env + env->avail++;
@@ -159,25 +428,30 @@ static char **_xutf8_env_setenv(xutf8_env_t *env, const char *name, const char *
 {
 	char **entry, *p;
 
-	if (env == NULL || env->env == NULL || name == NULL)
+	if (env == NULL || name == NULL)
 		return NULL;
+
+	_xutf8_env_lock(env);
 
 	/* Lookup entry that matches the name. */
 	if ((entry = _xutf8_evn_lookup(env->env, name)) == NULL)
 	{
 		if (value == NULL || value[0] == '\0')
-			return NULL;
-		return _xutf8_env_add(env, name, value);
+			goto done;
+		entry = _xutf8_env_add(env, name, value);
+		goto done;
 	}
 
 	if (value == NULL || value[0] == '\0')
 	{
 do_remove:
 		/* Remove entry. */
+		_xutf8_env_free(*entry);
 		while ((*entry = *(entry + 1)) != NULL)
 			entry++;
 		env->avail--;
-		return NULL;
+		entry = NULL;
+		goto done;
 	}
 
 	/* Get value from the entry. */
@@ -190,7 +464,7 @@ do_remove:
 
 	/* If old value is identical to the new value, do nothing. */
 	if (strcmp(p, value) == 0)
-		return entry;
+		goto done;
 
 	if (strlen(p) >= strlen(value))
 	{
@@ -200,21 +474,102 @@ do_remove:
 	else
 	{
 		/* Enlarge entry. */
-		if ((p = (char *)xrealloc(*entry, strlen(name) + strlen(value) + 2)) == NULL)
-			return NULL;
+		if ((p = (char *)_xutf8_env_realloc(*entry, strlen(name) + strlen(value) + 2)) == NULL)
+		{
+			entry = NULL;
+			goto done;
+		}
 		sprintf(p, "%s=%s", name, value);
 		*entry = p;
 	}
+
+done:
+	_xutf8_env_unlock(env);
 	return entry;
 }
 
-static char *_xutf8_getenv(xutf8_env_t *env, const char *name)
+char **_xutf8_clonewenv(xutf8_env_t *dst, wchar_t **src)
+{
+	char **dst_entry;
+	wchar_t **src_entry;
+	int count, size;
+	
+	if (dst == NULL)
+		return NULL;
+
+	if (dst->sem_wait == 0)
+		_xutf8_env_lock(dst);
+
+	if (dst->env)
+	{
+		/* Free all old variables. */
+		dst_entry = dst->env;
+		while (*dst_entry)
+			_xutf8_env_free(*dst_entry++);
+		dst->env[0] = NULL;
+		dst->avail = 0;
+	}
+
+	if (src == NULL)
+	{
+		/* Free the environment control block. */
+		if (dst->env)
+		{
+			_xutf8_env_free(dst->env);
+			dst->env = NULL;
+			dst->capacity = 0;
+		}
+		goto done;
+	}
+
+	/* Get the number of variables. */
+	src_entry = src;
+	count = 0;
+	while (*src_entry++)
+		count++;
+
+	if (dst->capacity < count)
+	{
+		size = count + count / 2;
+		if (size < _XUTF8_DEFEVNNUM)
+			size = _XUTF8_DEFEVNNUM;
+		dst_entry = (char **)_xutf8_env_realloc(dst->env, (size + 1) * sizeof(void *));
+		if (dst_entry == NULL)
+			goto done;
+		dst_entry[0] = NULL;
+		dst->env = dst_entry;
+		dst->capacity = size;
+	}
+
+	/* Clone environment data block. */
+	src_entry = src;
+	dst_entry = dst->env;
+	while (count-- && *src_entry)
+	{
+		size = WideCharToMultiByte(_XUTF8_CODEPAGE, 0, *src_entry, -1, NULL, 0, NULL, NULL);
+		if ((size <= 0) || (*dst_entry = (char *)_xutf8_env_malloc(size + 1)) == NULL)
+			break;
+		WideCharToMultiByte(_XUTF8_CODEPAGE, 0, *src_entry, -1,
+			*dst_entry, size + 1, NULL, NULL);
+		src_entry++;
+		dst_entry++;
+		dst->avail++;
+	}
+	*dst_entry = NULL;
+
+done:
+	if (dst->sem_wait == 0)
+		_xutf8_env_unlock(dst);
+	return dst->env;
+}
+
+char *_xutf8_getenv(xutf8_env_t *env, const char *name)
 {
 	wchar_t valbuf[_XUTF8_DEFEVNVAL], *wval;
 	char *ret = NULL, *val = (char *)valbuf, **entry;
 	int cnt;
 
-	if (env == NULL || env->env == NULL || name == NULL)
+	if (env == NULL || name == NULL)
 		return NULL;
 
 	/* Get the unicode environment value. */
@@ -227,9 +582,9 @@ static char *_xutf8_getenv(xutf8_env_t *env, const char *name)
 	if (cnt <= 0)
 	{
 		if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-			return NULL;
+			goto done;
 		if ((val = _xutf8_w2a_alloc(_XUTF8_CODEPAGE, wval)) == NULL)
-			return NULL;
+			goto done;
 	}
 	else
 		val[cnt] = '\0';
@@ -240,6 +595,7 @@ static char *_xutf8_getenv(xutf8_env_t *env, const char *name)
 
 	if (val != (char *)valbuf)
 		free(val);
+done:
 	return ret;
 }
 
@@ -271,13 +627,16 @@ int _xutf8_putenv(xutf8_env_t *env, const char *envstring)
 	if (wenvstr != valbuf)
 		free(wenvstr);
 	if (ret != 0)
-		return ret;
+		goto done;
 
 	/* Then, put the environment variable into the UTF-8 environment control block. */
 	if (strlen(envstring) >= sizeof(valbuf))
 	{
 		if ((val = xstrdup(envstring)) == NULL)
-			return -1;
+		{
+			ret = -1;
+			goto done;
+		}
 	}
 	else
 		strcpy(val, envstring);
@@ -287,78 +646,13 @@ int _xutf8_putenv(xutf8_env_t *env, const char *envstring)
 		ret = -1;
 	if (val != (char *)valbuf)
 		free(val);
-
+done:
 	return ret;
 }
 
-static char **_xutf8_clonewenv(xutf8_env_t *dst, wchar_t **src)
-{
-	char **dst_entry;
-	wchar_t **src_entry;
-	int count, cap;
-	
-	if (dst == NULL)
-		return NULL;
-
-	if (dst->env)
-	{
-		/* Free all old variables. */
-		dst_entry = dst->env;
-		while (*dst_entry)
-			free(*dst_entry++);
-		dst->env[0] = NULL;
-		dst->avail = 0;
-	}
-
-	if (src == NULL)
-	{
-		/* Free the environment control block. */
-		if (dst->env)
-		{
-			free(dst->env);
-			dst->env = NULL;
-			dst->capacity = 0;
-		}
-		return NULL;
-	}
-
-	/* Get the number of variables. */
-	src_entry = src;
-	count = 0;
-	while (*src_entry++)
-		count++;
-
-	if (dst->capacity < count)
-	{
-		cap = count + count / 2;
-		if (cap < _XUTF8_DEFEVNNUM)
-			cap = _XUTF8_DEFEVNNUM;
-		dst_entry = (char **)xmalloc((cap + 1) * sizeof(void *));
-		if (dst_entry == NULL)
-			return dst->env;
-		dst_entry[0] = NULL;
-		if (dst->env)
-			free(dst->env);
-		dst->env = dst_entry;
-		dst->capacity = cap;
-	}
-
-	/* Clone environment data block. */
-	src_entry = src;
-	dst_entry = dst->env;
-	while (count-- && *src_entry)
-	{
-		if ((*dst_entry = _xutf8_w2a_alloc(_XUTF8_CODEPAGE, *src_entry++)) == NULL)
-			break;
-		dst->avail++;
-		dst_entry++;
-	}
-	*dst_entry = NULL;
-
-	return dst->env;
-}
-
-/******************************************************************************/
+/*******************************************************************************
+ * MINGW API Wrappers
+ ******************************************************************************/
 
 static inline void xutf8_FindDataW2Utf8(LPWIN32_FIND_DATAW wfdata, LPWIN32_FIND_DATAA afdata)
 {
@@ -627,10 +921,8 @@ char *xutf8_getcwd(char *pointer, int len)
 #undef getenv
 char *xutf8_getenv(const char *name)
 {
-	if (!_xutf8_environ.env)
-		mingw_environ();
-	return _xutf8_environ.env ?
-		_xutf8_getenv(&_xutf8_environ, name) : getenv(name);
+	char *ret = _xutf8_getenv(&_xutf8_environ, name);
+	return _xutf8_environ.env ? ret : getenv(name);
 }
 #define getenv xutf8_getenv
 
@@ -666,28 +958,21 @@ static void xutf8_startup(int argc, char **argv)
 	for (; i < argc; i++)
 		argv[i] = xstrdup("");
 	LocalFree(wargv);
-
-	/* Initialize UTF-8 environment control block. */
-	mingw_environ();
 }
 
 int mingw_putenv(const char *envstring)
 {
-	if (!_xutf8_environ.env)
-		mingw_environ();
-	return _xutf8_environ.env ?
-		_xutf8_putenv(&_xutf8_environ, envstring) : _putenv(envstring);
+	int ret = _xutf8_putenv(&_xutf8_environ, envstring);
+	return _xutf8_environ.env ? ret : _putenv(envstring);
 }
 
 char **mingw_environ(void)
 {
-	if (!_xutf8_environ.env)
-	{
-		/* Duplicate an UTF-8 environment block. */
-		_wgetenv(L"PATH");
-		_xutf8_clonewenv(&_xutf8_environ, _wenviron);		
-	}
-	return _xutf8_environ.env ? _xutf8_environ.env : _environ;
+	char **env;
+	_xutf8_env_lock(&_xutf8_environ);
+	env = _xutf8_environ.env;
+	_xutf8_env_unlock(&_xutf8_environ);
+	return env ? env : _environ;
 }
 
 int mingw_chmod(const char *filename, int pmode)
