@@ -345,23 +345,35 @@ char **_xutf8_clonewenv(xutf8_env_t *dst, wchar_t **src);
 void _xutf8_env_lock(xutf8_env_t *env)
 {
 	static const wchar_t sem_guid[] = L"{196D57D9-0717-4F20-95DD-58D0297A402C}";
-	wchar_t sem_name[sizeof(sem_guid)/sizeof(wchar_t) + 8];
+	wchar_t sem_name[sizeof(sem_guid)/sizeof(wchar_t) + 10];
 	HANDLE sem;
 
-	sem = (HANDLE)InterlockedExchangePointer((void **)&env->sem, env->sem);
+#if defined(WIN64) || defined(_WIN64)
+	sem = (HANDLE)_InterlockedXor64((__int64 *)(&env->sem), 0);
+#else
+	sem = (HANDLE)_InterlockedXor((long *)(&env->sem), 0);
+#endif
 	if (sem == NULL)
 	{
-		swprintf(sem_name, L"%s%08X", sem_guid, GetCurrentProcessId());
+		_swprintf(sem_name, L"%s-%.8X", sem_guid, GetCurrentProcessId());
 		sem = CreateSemaphoreW(NULL, 1, 1, sem_name);
 		if (sem == NULL)
 			return;
 		if (GetLastError() == ERROR_ALREADY_EXISTS)
+		{
+			WaitForSingleObject(sem, INFINITE);
 			CloseHandle(sem);
-		(void)InterlockedExchangePointer((void **)&env->sem, sem);
+			sem = NULL;
+		}
+		else
+		{
+			(void)InterlockedExchangePointer((void **)&env->sem, sem);
+		}
 	}
 
 	/* Obtain lock. */
-	WaitForSingleObject(sem, INFINITE);
+	if (sem)
+		WaitForSingleObject(sem, INFINITE);
 
 	if (env->env == NULL)
 	{
