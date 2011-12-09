@@ -344,19 +344,15 @@ char **_xutf8_clonewenv(xutf8_env_t *dst, wchar_t **src);
 
 void _xutf8_env_lock(xutf8_env_t *env)
 {
-	static const wchar_t sem_guid[] = L"{196D57D9-0717-4F20-95DD-58D0297A402C}";
-	wchar_t sem_name[sizeof(sem_guid)/sizeof(wchar_t) + 10];
+	static const char sem_guid[] = "{196D57D9-0717-4F20-95DD-58D0297A402C}";
+	char sem_name[sizeof(sem_guid)/sizeof(sem_guid[0]) + 10];
 	HANDLE sem;
 
-#if defined(WIN64) || defined(_WIN64)
-	sem = (HANDLE)_InterlockedXor64((__int64 *)(&env->sem), 0);
-#else
-	sem = (HANDLE)_InterlockedXor((long *)(&env->sem), 0);
-#endif
+	sem = (HANDLE)InterlockedCompareExchangePointer((void**)&env->sem, NULL, NULL);
 	if (sem == NULL)
 	{
-		_swprintf(sem_name, L"%s-%.8X", sem_guid, GetCurrentProcessId());
-		sem = CreateSemaphoreW(NULL, 1, 1, sem_name);
+		sprintf(sem_name, "%s-%.8X", sem_guid, GetCurrentProcessId());
+		sem = CreateSemaphoreA(NULL, 1, 1, sem_name);
 		if (sem == NULL)
 			return;
 		if (GetLastError() == ERROR_ALREADY_EXISTS)
