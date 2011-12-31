@@ -107,6 +107,10 @@ int xutf8_access(const char *filename, int pmode);
 
 int xutf8_chdir(const char *path);
 
+char *xutf8_mktemp(char *stemplate);
+
+int xutf8_mktemp_s(char *stemplate, size_t size);
+
 char **xutf8_environ(void);
 
 char *xutf8_getenv(const char *name);
@@ -159,12 +163,42 @@ int xutf8_wputenv_s(const wchar_t *name, const wchar_t *value);
 	#define getenv				xutf8_getenv
 #endif /* defined(__XUTF8_INIT__) || !defined(__XUTF8_GITPRJ__) */
 
+#undef  _unlink
+#define _unlink					xutf8_unlink
+#undef  _rmdir
+#define _rmdir					xutf8_rmdir
+#undef  _mkdir
+#define _mkdir					xutf8_mkdir
+#undef  _open
+#define _open					xutf8_open
+//#undef  _fopen
+//#define _fopen				xutf8_fopen
+//#undef  _freopen
+//#define _freopen				xutf8_freopen
+#undef  _getcwd
+#define _getcwd					xutf8_getcwd
+//#undef  _rename
+//#define _rename				xutf8_rename
+//#undef  _getenv
+//#define _getenv				xutf8_getenv
 #undef  chmod
 #define chmod					xutf8_chmod
+#undef  _chmod
+#define _chmod					xutf8_chmod
 #undef  access
 #define access					xutf8_access
+#undef  _access
+#define _access					xutf8_access
 #undef  chdir
 #define chdir					xutf8_chdir
+#undef  _chdir
+#define _chdir					xutf8_chdir
+#undef  mktemp
+#define mktemp					xutf8_mktemp
+#undef  _mktemp
+#define _mktemp					xutf8_mktemp
+#undef  _mktemp_s
+#define _mktemp_s				xutf8_mktemp_s
 #undef  environ
 #define environ					xutf8_environ()
 #undef  _environ

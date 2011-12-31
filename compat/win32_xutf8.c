@@ -1299,6 +1299,32 @@ int xutf8_chdir(const char *path)
 	return _wchdir(_xutf82w(path, wstr1));
 }
 
+char *xutf8_mktemp(char *stemplate)
+{
+	wchar_t wstr1[_XUTF8_MAXWPATH];
+#ifdef _MSC_VER
+	if (_wmktemp_s(_xutf82w(stemplate, wstr1), _XUTF8_MAXWPATH) != 0)
+#else
+	if (_wmktemp(_xutf82w(stemplate, wstr1)) == NULL)
+#endif
+		return NULL;
+	_xutf8_w2a(_XUTF8_CODEPAGE, wstr1, stemplate, (int)strlen(stemplate) + 1);
+	return stemplate;
+}
+
+int xutf8_mktemp_s(char *stemplate, size_t size)
+{
+	wchar_t wstr1[_XUTF8_MAXWPATH];
+#ifdef _MSC_VER
+	if (_wmktemp_s(_xutf82w(stemplate, wstr1), _XUTF8_MAXWPATH) != 0)
+#else
+	if (_wmktemp(_xutf82w(stemplate, wstr1)) == NULL)
+#endif
+		return -1;
+	_xutf8_w2a(_XUTF8_CODEPAGE, wstr1, stemplate, size);
+	return 0;
+}
+
 char **xutf8_environ(void)
 {
 	char **env;
@@ -1436,18 +1462,6 @@ static void xutf8_startup(int argc, char **argv)
 	/* Initial UTF8 environment. */
 	SetEnvironmentVariableA(_xutf8_env_name, NULL);
 }
-
-int mkstemp(char *stemplate)
-{
-	wchar_t *filename;
-	wchar_t wstr1[_XUTF8_MAXWPATH];
-	filename = _wmktemp(_xutf82w(stemplate, wstr1));
-	if (filename == NULL)
-		return -1;
-	_xutf8_w2a(_XUTF8_CODEPAGE, filename, stemplate, (int)strlen(stemplate) + 1);
-	return _wopen(filename, O_RDWR | O_CREAT, 0600);
-}
-#define mkstemp _mkstemp_dummy
 
 #else /* !__XUTF8_ENABLED__ */
 
