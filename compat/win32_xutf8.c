@@ -1,9 +1,29 @@
+#include <fcntl.h>
+#include <shellapi.h>
 #ifndef __XUTF8_INIT__
 #include "win32.h"
 #include "win32_xutf8.h"
 #endif
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+
+/******************************************************************************/
+
 #ifdef __XUTF8_ENABLED__
+
+#ifndef __XUTF8_GITPRJ__
+#define xmalloc		malloc
+#define xcalloc		calloc
+#define xrealloc	realloc
+#define xstrdup		strdup
+#endif /* __XUTF8_GITPRJ__ */
+
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof(a[0]))
+#endif
 
 /*******************************************************************************
  * Charset convertion
@@ -22,12 +42,8 @@ wchar_t *_xutf8_a2w(unsigned codepage, const char *src, wchar_t *dst, int dst_le
 	if (src)
 	{
 		len = MultiByteToWideChar(codepage, 0, src, -1, dst, dst_len);
-		if (len >= 0)
-		{
-			if (len >= dst_len)
-				dst[dst_len - 1] = '\0';
+		if (len > 0)
 			return dst;
-		}
 	}
 	dst[0] = '\0';
 	return NULL;
@@ -43,18 +59,14 @@ char *_xutf8_w2a(unsigned codepage, const wchar_t *src, char *dst, int dst_len)
 	if (src)
 	{
 		len = WideCharToMultiByte(codepage, 0, src, -1, dst, dst_len, NULL, NULL);
-		if (len >= 0)
-		{
-			if (len >= dst_len)
-				dst[dst_len - 1] = '\0';
+		if (len > 0)
 			return dst;
-		}
 	}
 	dst[0] = '\0';
 	return NULL;
 }
 
-wchar_t *_xutf8_a2w_alloc(unsigned codepage, const char *src)
+wchar_t *_xutf8_a2w_alloc(unsigned codepage, const char *src, wchar_t *buf, int bufsz)
 {
 	wchar_t *dst = NULL;
 	int len;
@@ -64,18 +76,18 @@ wchar_t *_xutf8_a2w_alloc(unsigned codepage, const char *src)
 		len = MultiByteToWideChar(codepage, 0, src, -1, NULL, 0);
 		if (len > 0)
 		{
-			dst = (wchar_t *)xmalloc((len + 1) * sizeof(wchar_t));
+			if (buf == NULL || len > bufsz)
+				dst = (wchar_t *)xmalloc(len * sizeof(wchar_t));
+			else
+				dst = buf;
 			if (dst)
-			{
-				len = MultiByteToWideChar(codepage, 0, src, -1, dst, len);
-				dst[len] = '\0';
-			}
+				MultiByteToWideChar(codepage, 0, src, -1, dst, len);
 		}
 	}
 	return dst;
 }
 
-char *_xutf8_w2a_alloc(unsigned codepage, const wchar_t *src)
+char *_xutf8_w2a_alloc(unsigned codepage, const wchar_t *src, char *buf, int bufsz)
 {
 	char *dst = NULL;
 	int len;
@@ -85,15 +97,247 @@ char *_xutf8_w2a_alloc(unsigned codepage, const wchar_t *src)
 		len = WideCharToMultiByte(codepage, 0, src, -1, NULL, 0, NULL, NULL);
 		if (len > 0)
 		{
-			dst = (char *)xmalloc((len + 1) * sizeof(char));
+			if (buf == NULL || len > bufsz)
+				dst = (char *)xmalloc(len * sizeof(*dst));
+			else
+				dst = buf;
 			if (dst)
-			{
-				len = WideCharToMultiByte(codepage, 0, src, -1, dst, len + 1, NULL, NULL);
-				dst[len] = '\0';
-			}
+				WideCharToMultiByte(codepage, 0, src, -1, dst, len + 1, NULL, NULL);
 		}
 	}
 	return dst;
+}
+
+size_t _xutf8_str2hex(const char *p, char **end)
+{
+	size_t val;
+	UINT digit;
+	for (val = 0; ; p++)
+	{
+		if (*p >= '0' && *p <= '9')        
+			digit = *p - '0';
+		else if (*p >= 'a' && *p <= 'f')
+			digit = *p - ('a' - 10);
+		else if (*p >= 'A' && *p <= 'F')
+			digit = *p - ('A' - 10);
+		else
+			break;
+		val = (val << 4) + digit;
+	}
+	if (end)
+		*end = (char *)p;
+	return val;
+}
+
+char *_xutf8_hex2str(char *p, size_t value, size_t width)
+{
+	char buf[16];
+	size_t num = 0, digit;
+	do
+	{
+		digit = value & 0x0F;
+		buf[num++] = (char)(digit + (digit < 10 ? '0' : ('A' - 10)));
+		value >>= 4;
+	} while (value != 0);
+	while (num < width--)
+		*p++ = '0';
+	while (num > 0)
+		*p++ = buf[--num];
+	*p = '\0';
+	return p;
+}
+
+/*******************************************************************************
+ * Quick Sort
+ ******************************************************************************/
+
+#define QSORT_WIDTH						sizeof(void*)
+#define QSORT_CUTOFF					8
+#define QSORT_STKSIZ					(8 * sizeof(void*) - 2)
+#define QSORT_COMPARE(a, b) 			stricmp(*(char **)(a), *(char **)(b))
+#define QSORT_SWAP(a, b)				qsort_swap(a, b, width)
+#define QSORT_SHORTSORT(lo, hi, width)	qsort_shortsort(lo, hi, width)
+
+static __inline void qsort_swap(char *a, char *b, size_t width)
+{
+#ifdef QSORT_WIDTH
+
+	char *tmp;
+	tmp = *(char **)a;
+	*(char **)a = *(char **)b;
+	*(char **)b = tmp;
+
+#else /* !QSORT_WIDTH */
+
+	char tmp;
+    if (a != b)
+    {
+        while (width--)
+        {
+            tmp = *a;
+            *a++ = *b;
+            *b++ = tmp;
+        }
+    }
+
+#endif /* QSORT_WIDTH */
+}
+
+static void qsort_shortsort(char *lo, char *hi, size_t width)
+{
+    char *p, *max;
+
+    while (hi > lo)
+    {
+        max = lo;
+        for (p = lo + width; p <= hi; p += width)
+        {
+            if (QSORT_COMPARE(p, max) > 0)
+                max = p;
+        }
+        QSORT_SWAP(max, hi);
+        hi -= width;
+    }
+}
+
+void _xutf8_qsort(void *base, size_t num, size_t width)
+{
+    char *lo, *hi;
+    char *mid;
+    char *loguy, *higuy;
+    size_t size;
+    char *lostk[QSORT_STKSIZ], *histk[QSORT_STKSIZ];
+    int stkptr;
+
+#ifdef QSORT_WIDTH
+#define width QSORT_WIDTH
+#endif
+
+    if (num < 2)
+        return;
+
+    stkptr = 0;
+
+    lo = (char *)base;
+    hi = (char *)base + width * (num-1);
+
+recurse:
+
+    size = (hi - lo) / width + 1;
+
+    if (size <= QSORT_CUTOFF)
+    {
+        qsort_shortsort(lo, hi, width);
+    }
+    else
+    {
+        mid = lo + (size / 2) * width;
+
+        if (QSORT_COMPARE(lo, mid) > 0)
+        {
+            QSORT_SWAP(lo, mid);
+        }
+        if (QSORT_COMPARE(lo, hi) > 0)
+        {
+            QSORT_SWAP(lo, hi);
+        }
+        if (QSORT_COMPARE(mid, hi) > 0)
+        {
+            QSORT_SWAP(mid, hi);
+        }
+
+        loguy = lo;
+        higuy = hi;
+
+        for (;;)
+        {
+            if (mid > loguy)
+            {
+                do
+                {
+                    loguy += width;
+                } while (loguy < mid && QSORT_COMPARE(loguy, mid) <= 0);
+            }
+            if (mid <= loguy)
+            {
+                do
+                {
+                    loguy += width;
+                } while (loguy <= hi && QSORT_COMPARE(loguy, mid) <= 0);
+            }
+
+            do
+            {
+                higuy -= width;
+            } while (higuy > mid && QSORT_COMPARE(higuy, mid) > 0);
+
+            if (higuy < loguy)
+                break;
+
+            QSORT_SWAP(loguy, higuy);
+
+            if (mid == higuy)
+                mid = loguy;
+        }
+
+        higuy += width;
+        if (mid < higuy)
+        {
+            do
+            {
+                higuy -= width;
+            } while (higuy > mid && QSORT_COMPARE(higuy, mid) == 0);
+        }
+        if (mid >= higuy)
+        {
+            do
+            {
+                higuy -= width;
+            } while (higuy > lo && QSORT_COMPARE(higuy, mid) == 0);
+        }
+
+        if ( higuy - lo >= hi - loguy )
+        {
+            if (lo < higuy)
+            {
+                lostk[stkptr] = lo;
+                histk[stkptr] = higuy;
+                ++stkptr;
+            }
+
+            if (loguy < hi)
+            {
+                lo = loguy;
+                goto recurse;
+            }
+        }
+        else
+        {
+            if (loguy < hi)
+            {
+                lostk[stkptr] = loguy;
+                histk[stkptr] = hi;
+                ++stkptr;
+            }
+
+            if (lo < higuy)
+            {
+                hi = higuy;
+                goto recurse;
+            }
+        }
+    }
+
+    if (--stkptr >= 0)
+    {
+        lo = lostk[stkptr];
+        hi = histk[stkptr];
+        goto recurse;
+    }
+
+#ifdef QSORT_WIDTH
+#undef width
+#endif
 }
 
 /*******************************************************************************
@@ -107,8 +351,10 @@ char *_xutf8_w2a_alloc(unsigned codepage, const wchar_t *src)
 typedef struct _mem_pool_struct  mem_pool_t;
 typedef struct _mem_block_struct mem_block_t;
 
-#define _mem_pool_lock(pool)	(void)0
-#define _mem_pool_unlock(pool)	(void)0
+#define _mem_pool_lock_init(pool)	(void)0
+#define _mem_pool_lock_uninit(pool)	(void)0
+#define _mem_pool_lock(pool)		(void)0
+#define _mem_pool_unlock(pool)		(void)0
 
 struct _mem_block_struct
 {
@@ -153,6 +399,9 @@ void mem_pool_init(mem_pool_t *pool, void *pool_addr, size_t pool_size)
 	block->next_block = (mem_block_t *)start;
 	/* Tail is marked as ALLOCATED. */
 	block->pool_ptr = pool;
+
+	/* Initialize lock. */
+	_mem_pool_lock_init(pool);
 }
 
 static void *_mem_pool_alloc(mem_pool_t *pool, size_t size)
@@ -324,80 +573,134 @@ done:
 
 typedef struct _xutf8_env_struct
 {
-	char	**env;
-	int		avail;
-	int		capacity;
-	int		sem_wait;
-	HANDLE	sem;
+	mem_pool_t	pool;
+	char		**tab;
+	int			count;
+	int			capacity;
 } xutf8_env_t;
 
-static xutf8_env_t _xutf8_environ;
-static mem_pool_t  _xutf8_pool;
-static char        _xutf8_pool_buffer[_XUTF8_EVNPOOLSIZE];
+static const char _xutf8_env_guid[] = "196D57D9-0717-4F20-95DD-58D0297A402C";
+static const char _xutf8_env_name[] = "__GIT_XUTF8_ENV__";
 
-#define _xutf8_env_malloc(size)		mem_pool_alloc(&_xutf8_pool, size)
+static xutf8_env_t *_xutf8_environ;
+static HANDLE _xutf8_env_sem;
+
+#define _xutf8_env_malloc(size)		mem_pool_alloc(&_xutf8_environ->pool, size)
 #define _xutf8_env_realloc(p, size)	((p) ? mem_pool_realloc(p, size) : \
-										   mem_pool_alloc(&_xutf8_pool, size))
+										   mem_pool_alloc(&_xutf8_environ->pool, size))
 #define _xutf8_env_free(p)			mem_pool_free(p)
 
-char **_xutf8_clonewenv(xutf8_env_t *dst, wchar_t **src);
-
-void _xutf8_env_lock(xutf8_env_t *env)
+static char **_xutf8_clonewenv(xutf8_env_t **ppdst, wchar_t *src)
 {
-	static const char sem_guid[] = "{196D57D9-0717-4F20-95DD-58D0297A402C}";
-	char sem_name[sizeof(sem_guid)/sizeof(sem_guid[0]) + 10];
-	HANDLE sem;
+	xutf8_env_t *dst;
+	char **dst_entry;
+	wchar_t *src_ptr;
+	int count, size;
+	
+	if ((ppdst == NULL) || ((dst = *ppdst) == NULL))
+		return NULL;
 
-	sem = (HANDLE)InterlockedCompareExchangePointer((void**)&env->sem, NULL, NULL);
-	if (sem == NULL)
+	if (dst->tab)
 	{
-		sprintf(sem_name, "%s-%.8X", sem_guid, GetCurrentProcessId());
-		sem = CreateSemaphoreA(NULL, 1, 1, sem_name);
-		if (sem == NULL)
-			return;
-		if (GetLastError() == ERROR_ALREADY_EXISTS)
+		/* Free all old variables. */
+		dst_entry = dst->tab;
+		while (*dst_entry)
+			_xutf8_env_free(*dst_entry++);
+		dst->tab[0] = NULL;
+		dst->count = 0;
+	}
+
+	if (src == NULL)
+	{
+		/* Free the environment control block. */
+		if (dst->tab)
 		{
-			WaitForSingleObject(sem, INFINITE);
-			CloseHandle(sem);
-			sem = NULL;
+			/* Unset the relative environment variable. */
+			SetEnvironmentVariableA(_xutf8_env_name, NULL);
+			/* Free memory pool. */
+			_xutf8_env_free(dst->tab);
+			dst->tab = NULL;
+			dst->capacity = 0;
+			/* Free memory pool. */
+			LocalFree(dst);
+			*ppdst = dst = NULL;
+			/* Release the lock. */
+			CloseHandle((HANDLE)InterlockedExchangePointer((void**)&_xutf8_env_sem, NULL));
 		}
-		else
+		return NULL;
+	}
+
+	/* Get the number of variables. */
+	for (count = 0, src_ptr = src; ; src_ptr++)
+	{
+		if (*src_ptr == '\0')
 		{
-			(void)InterlockedExchangePointer((void **)&env->sem, sem);
+			if (src_ptr == src)
+				break;
+			count++;
+			if (*++src_ptr == '\0')
+				break;
 		}
 	}
 
-	/* Obtain lock. */
-	if (sem)
-		WaitForSingleObject(sem, INFINITE);
-
-	if (env->env == NULL)
+	if (dst->capacity < count)
 	{
-		/* Initialize memory pool and UTF-8 environemnt control block. */
-		mem_pool_init(&_xutf8_pool, _xutf8_pool_buffer, sizeof(_xutf8_pool_buffer));
-		_wgetenv(L"PATH");
-		env->sem_wait++;
-		_xutf8_clonewenv(&_xutf8_environ, _wenviron);
-		env->sem_wait--;
+		size = count + 1 + count / 2;
+		if (size < _XUTF8_DEFENVNUM)
+			size = _XUTF8_DEFENVNUM;
+		dst_entry = (char **)_xutf8_env_realloc(dst->tab, size * sizeof(char *));
+		if (dst_entry == NULL)
+			goto done;
+		dst_entry[0] = NULL;
+		dst->tab = dst_entry;
+		dst->capacity = size - 1;
 	}
+
+	/* Clone environment variable table. */
+	src_ptr = src;
+	dst_entry = dst->tab;
+	while (count--)
+	{
+		if (*src_ptr != '=')
+		{
+			size = WideCharToMultiByte(_XUTF8_CODEPAGE, 0, src_ptr, -1, NULL, 0, NULL, NULL);
+			if ((size <= 0) || (*dst_entry = (char *)_xutf8_env_malloc(size)) == NULL)
+				break;
+			WideCharToMultiByte(_XUTF8_CODEPAGE, 0, src_ptr, -1,
+				*dst_entry, size, NULL, NULL);
+			dst_entry++;
+			dst->count++;
+		}
+		while (*src_ptr++) ;
+	}
+	*dst_entry = NULL;
+
+	/* Sort the table. */
+	_xutf8_qsort(dst->tab, dst->count, sizeof(dst->tab[0]));
+
+done:
+	return dst->tab;
 }
 
-void _xutf8_env_unlock(xutf8_env_t *env)
+static int _xutf8_env_lookup(xutf8_env_t *env, const char *name, int *insert_pos)
 {
-	ReleaseSemaphore(env->sem, 1, NULL);
-}
-
-static char **_xutf8_evn_lookup(char **env, const char *name)
-{
-	char *entry;
-	const char *pname;
+	size_t l, m, h;
+	char **tab;
+	const char *entry, *pname;
 	char centry, cname;
 
 	if (env == NULL || name == NULL)
-		return NULL;
+		return -1;
 
-	while ((entry = *env++) != NULL)
+	tab = env->tab;
+	l = 0;
+	h = env->count;
+	while (l < h)
 	{
+		m = (l + h) / 2;
+
+		/* Compare entry and name case-insensitively. */
+		entry = *(env->tab + m);
 		pname = name;
 		do
 		{
@@ -406,263 +709,194 @@ static char **_xutf8_evn_lookup(char **env, const char *name)
 			if (cname == '\0')
 			{
 				if (centry == '=')
-					return env - 1;
-				break;
+					return m;
 			}
 			if (centry >= 'A' && centry <= 'Z')
 				centry += 'a' - 'A';
 			if (cname >= 'A' && cname <= 'Z')
 				cname += 'a' - 'A';
 		} while (centry == cname);
+
+		if (centry > cname)
+			h = m;
+		else
+			l = m + 1;
 	}
-	return NULL;
+	if (insert_pos)
+		*insert_pos = l;
+	return -1;
 }
 
-static char **_xutf8_env_add(xutf8_env_t *env, const char *name, const char *value)
+static int _xutf8_env_set(xutf8_env_t *env, const char *name, const char *value)
 {
 	char **entry, *p;
-	if (env->avail == env->capacity)
-		return NULL;
-	if ((p = (char *)_xutf8_env_malloc(strlen(name) + strlen(value) + 2)) == NULL)
-		return NULL;
-	sprintf(p, "%s=%s", name, value);
-	entry = env->env + env->avail++;
-	entry[0] = p;
-	entry[1] = NULL;
-	return entry;
-}
+	int index, ipos, count;
 
-static char **_xutf8_env_setenv(xutf8_env_t *env, const char *name, const char *value)
-{
-	char **entry, *p;
+	if (env == NULL || name == NULL || name[0] == '\0')
+		return -1;
 
-	if (env == NULL || name == NULL)
-		return NULL;
-
-	_xutf8_env_lock(env);
-
-	/* Lookup entry that matches the name. */
-	if ((entry = _xutf8_evn_lookup(env->env, name)) == NULL)
+	index = _xutf8_env_lookup(env, name, &ipos);
+	if (index >= 0)
 	{
-		if (value == NULL || value[0] == '\0')
-			goto done;
-		entry = _xutf8_env_add(env, name, value);
-		goto done;
-	}
+		/* The variable has existed. */
 
-	if (value == NULL || value[0] == '\0')
-	{
-do_remove:
-		/* Remove entry. */
-		_xutf8_env_free(*entry);
-		while ((*entry = *(entry + 1)) != NULL)
-			entry++;
-		env->avail--;
-		entry = NULL;
-		goto done;
-	}
-
-	/* Get value from the entry. */
-	if ((p = strchr(*entry, '=')) == NULL)
-	{
-		/* Remove bad entry. */
-		goto do_remove;
-	}
-	p++;
-
-	/* If old value is identical to the new value, do nothing. */
-	if (strcmp(p, value) == 0)
-		goto done;
-
-	if (strlen(p) >= strlen(value))
-	{
-		/* Set value. */
-		strcpy(p, value);
-	}
-	else
-	{
-		/* Enlarge entry. */
-		if ((p = (char *)_xutf8_env_realloc(*entry, strlen(name) + strlen(value) + 2)) == NULL)
+		entry = env->tab + index;
+		if (value != NULL && *value != '\0')
 		{
-			entry = NULL;
-			goto done;
+			/* Update the value. */
+			count = (int)strlen(name) + 1;
+			p = *entry;
+			if (strcmp(p + count, value) != 0)
+			{
+				p = (char *)_xutf8_env_realloc(p, count + strlen(value) + 1);
+				if (p == NULL)
+					return -1;
+				*entry = p;
+				strcpy(p + count, value);
+			}
 		}
-		sprintf(p, "%s=%s", name, value);
+		else
+		{
+			/* Remove the variable. */
+			_xutf8_env_free(*entry);
+			memcpy(entry, entry + 1, (env->count - index) * sizeof(char *));
+			env->count--;
+		}
+	}
+	else if (value != NULL && *value != '\0')
+	{
+		/* The variable has not existed. */
+
+		if (env->count == env->capacity)
+		{
+			/* Table grows. */
+			count = env->count;
+			count += count / 2;
+			entry = (char **)_xutf8_env_realloc(env->tab, count * sizeof(char *));
+			if (entry == NULL)
+				return -1;
+			env->tab = entry;
+			env->capacity = count - 1;
+		}
+
+		/* Allocate variable string. */
+		count = (int)strlen(name);
+		index = (int)strlen(value);
+		p = (char *)_xutf8_env_malloc(count + index + 2);
+		if (p == NULL)
+			return -1;
+
+		/* Add a new variable. */
+		entry = env->tab + ipos;
+		memmove(entry + 1, entry, (env->count - ipos + 1) * sizeof(char *));
+		memcpy(p, name, count);
+		*(p + count) = '=';
+		memcpy(p + count + 1, value, index + 1);
 		*entry = p;
-	}
+		env->count++;
 
-done:
-	_xutf8_env_unlock(env);
-	return entry;
+		/* Return index. */
+		index = ipos;
+	}
+	return index;
 }
 
-char **_xutf8_clonewenv(xutf8_env_t *dst, wchar_t **src)
+static void _xutf8_env_lock(xutf8_env_t **ppenv)
 {
-	char **dst_entry;
-	wchar_t **src_entry;
-	int count, size;
-	
-	if (dst == NULL)
-		return NULL;
+	char buf[64], *p;
+	wchar_t *wenv;
+	DWORD ret;
+	HANDLE sem = NULL;
+	xutf8_env_t *env = NULL;
+	const int pool_size = _XUTF8_EVNPOOLSIZE;
 
-	if (dst->sem_wait == 0)
-		_xutf8_env_lock(dst);
+	sem = (HANDLE)InterlockedCompareExchangePointer((void**)&_xutf8_env_sem, NULL, NULL);
 
-	if (dst->env)
+	/* Get the lock if it exists. Otherwize, create it. */
+	if (sem == NULL || WaitForSingleObject(sem, INFINITE) != WAIT_OBJECT_0)
 	{
-		/* Free all old variables. */
-		dst_entry = dst->env;
-		while (*dst_entry)
-			_xutf8_env_free(*dst_entry++);
-		dst->env[0] = NULL;
-		dst->avail = 0;
-	}
+		/* Make unique semaphore name. Format: "%s-%X". */
+		p = buf;
+		strcpy(p, _xutf8_env_guid);
+		p += ARRAY_SIZE(_xutf8_env_guid) - 1;
+		*p++ = '-';
+		_xutf8_hex2str(p, GetCurrentProcessId(), sizeof(DWORD) * 2);
 
-	if (src == NULL)
-	{
-		/* Free the environment control block. */
-		if (dst->env)
+		sem = CreateSemaphoreA(NULL, 0, 1, buf);
+		if (sem == NULL)
+			return;
+		if (GetLastError() == ERROR_ALREADY_EXISTS)
 		{
-			_xutf8_env_free(dst->env);
-			dst->env = NULL;
-			dst->capacity = 0;
+			/* Obtain the semaphore if it has existed already. */
+			WaitForSingleObject(sem, INFINITE);
+			CloseHandle(sem);
+			sem = NULL;
+
+			/* Get the environment control block from the environment variable. */
+			ret = GetEnvironmentVariableA(_xutf8_env_name, buf, ARRAY_SIZE(buf));
+			if (ret > 0 && ret < ARRAY_SIZE(buf))
+			{
+				p = buf;
+				if (*p++ == '#' && (DWORD)_xutf8_str2hex(p, &p) == GetCurrentProcessId())
+				{
+					if (*p++ == ':')
+					{
+						sem = (HANDLE)_xutf8_str2hex(p, &p);
+						(void)InterlockedExchangePointer((void **)&_xutf8_env_sem, sem);
+						if (*p++ == ':')
+							*ppenv = env = (xutf8_env_t *)_xutf8_str2hex(p, NULL);
+					}
+				}
+			}
 		}
-		goto done;
-	}
-
-	/* Get the number of variables. */
-	src_entry = src;
-	count = 0;
-	while (*src_entry++)
-		count++;
-
-	if (dst->capacity < count)
-	{
-		size = count + count / 2;
-		if (size < _XUTF8_DEFEVNNUM)
-			size = _XUTF8_DEFEVNNUM;
-		dst_entry = (char **)_xutf8_env_realloc(dst->env, (size + 1) * sizeof(void *));
-		if (dst_entry == NULL)
-			goto done;
-		dst_entry[0] = NULL;
-		dst->env = dst_entry;
-		dst->capacity = size;
-	}
-
-	/* Clone environment data block. */
-	src_entry = src;
-	dst_entry = dst->env;
-	while (count-- && *src_entry)
-	{
-		size = WideCharToMultiByte(_XUTF8_CODEPAGE, 0, *src_entry, -1, NULL, 0, NULL, NULL);
-		if ((size <= 0) || (*dst_entry = (char *)_xutf8_env_malloc(size + 1)) == NULL)
-			break;
-		WideCharToMultiByte(_XUTF8_CODEPAGE, 0, *src_entry, -1,
-			*dst_entry, size + 1, NULL, NULL);
-		src_entry++;
-		dst_entry++;
-		dst->avail++;
-	}
-	*dst_entry = NULL;
-
-done:
-	if (dst->sem_wait == 0)
-		_xutf8_env_unlock(dst);
-	return dst->env;
-}
-
-char *_xutf8_getenv(xutf8_env_t *env, const char *name)
-{
-	wchar_t valbuf[_XUTF8_DEFEVNVAL], *wval;
-	char *ret = NULL, *val = (char *)valbuf, **entry;
-	int cnt;
-
-	if (env == NULL || name == NULL)
-		return NULL;
-
-	/* Get the unicode environment value. */
-	_xutf82w(name, valbuf);
-	if ((wval = _wgetenv(valbuf)) == NULL)
-		return NULL;
-
-	/* Convert unicode to UTF-8. */
-	cnt = WideCharToMultiByte(_XUTF8_CODEPAGE, 0, wval, -1, val, sizeof(valbuf) - 1, NULL, NULL);
-	if (cnt <= 0)
-	{
-		if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-			goto done;
-		if ((val = _xutf8_w2a_alloc(_XUTF8_CODEPAGE, wval)) == NULL)
-			goto done;
-	}
-	else
-		val[cnt] = '\0';
-
-	/* Update the relative variable in the environment control block. */
-	if ((entry = _xutf8_env_setenv(env, name, val)) != NULL)
-		ret = strchr(*entry, '=') + 1;
-
-	if (val != (char *)valbuf)
-		free(val);
-done:
-	return ret;
-}
-
-int _xutf8_putenv(xutf8_env_t *env, const char *envstring)
-{
-	wchar_t valbuf[_XUTF8_DEFEVNVAL];
-	wchar_t *wenvstr = valbuf;
-	char *val = (char *)valbuf, *p;
-	char **entry;
-	int ret;
-
-	if (envstring == NULL)
-		return -1;
-	if ((p = (char *)strchr(envstring, '=')) == NULL || p == envstring)
-		return -1;
-
-	/* At first, call system _wsetenv(). */
-	ret = MultiByteToWideChar(_XUTF8_CODEPAGE, 0, envstring, -1, valbuf, ARRAY_SIZE(valbuf) - 1);
-	if (ret <= 0)
-	{
-		if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-			return -1;
-		if ((wenvstr = _xutf8_a2w_alloc(_XUTF8_CODEPAGE, envstring)) == NULL)
-			return -1;
-	}
-	else
-		wenvstr[ret] = '\0';
-	ret = _wputenv(wenvstr);
-	if (wenvstr != valbuf)
-		free(wenvstr);
-	if (ret != 0)
-		goto done;
-
-	/* Then, put the environment variable into the UTF-8 environment control block. */
-	if (strlen(envstring) >= sizeof(valbuf))
-	{
-		if ((val = xstrdup(envstring)) == NULL)
+		else
 		{
-			ret = -1;
-			goto done;
+			(void)InterlockedExchangePointer((void **)&_xutf8_env_sem, sem);
 		}
 	}
-	else
-		strcpy(val, envstring);
-	p = val + (p - envstring);
-	*p++ = '\0';
-	if ((entry = _xutf8_env_setenv(env, val, p)) == NULL && *p != '\0')
-		ret = -1;
-	if (val != (char *)valbuf)
-		free(val);
-done:
-	return ret;
+
+	if ((env = *ppenv) == NULL)
+	{
+		/* Allocate memory for pool. */
+		env = (xutf8_env_t *)LocalAlloc(LPTR, sizeof(xutf8_env_t) + pool_size);
+		if (env == NULL)
+			return;
+		env->tab      = NULL;
+		env->count    = 0;
+		env->capacity = 0;
+		*ppenv        = env;
+
+		/* Set the semaphore's handle and the pool buffer's address as an environment vairaible.
+		   Format: "#%X:%p:%p". */
+		p = buf;
+		*p++ = '#';
+		p = _xutf8_hex2str(p, GetCurrentProcessId(), sizeof(DWORD) * 2);
+		*p++ = ':';
+		p = _xutf8_hex2str(p, (size_t)sem, sizeof(HANDLE) * 2);
+		*p++ = ':';
+		p = _xutf8_hex2str(p, (size_t)env, sizeof(void *) * 2);
+		SetEnvironmentVariableA(_xutf8_env_name, buf);
+
+		/* Initialize memory pool and UTF-8 environemnt control block. */
+		mem_pool_init(&env->pool, env + 1, pool_size);
+		if ((wenv = GetEnvironmentStringsW()) != NULL)
+		{
+			_xutf8_clonewenv(ppenv, wenv);
+			FreeEnvironmentStringsW(wenv);
+		}
+	}
+}
+
+static void _xutf8_env_unlock(xutf8_env_t *env)
+{
+	ReleaseSemaphore(_xutf8_env_sem, 1, NULL);
 }
 
 /*******************************************************************************
  * MINGW API Wrappers
  ******************************************************************************/
 
-static inline void xutf8_FindDataW2Utf8(LPWIN32_FIND_DATAW wfdata, LPWIN32_FIND_DATAA afdata)
+static __inline void xutf8_FindDataW2Utf8(LPWIN32_FIND_DATAW wfdata, LPWIN32_FIND_DATAA afdata)
 {
 	afdata->dwFileAttributes = wfdata->dwFileAttributes;
 	afdata->ftCreationTime   = wfdata->ftCreationTime;
@@ -789,11 +1023,11 @@ BOOL WINAPI xutf8_CreateProcessA(
 	if (sa == NULL)
 		return FALSE;
 
-	lpwszDesktop = _xutf8_a2w_alloc(_XUTF8_CODEPAGE, sa->lpDesktop);
-	lpwszTitle   = _xutf8_a2w_alloc(_XUTF8_CODEPAGE, sa->lpTitle);
-	lpwszAppName = _xutf8_a2w_alloc(_XUTF8_CODEPAGE, lpApplicationName);
-	lpwszCmdLine = _xutf8_a2w_alloc(_XUTF8_CODEPAGE, lpCommandLine);
-	lpwszCurDir  = _xutf8_a2w_alloc(_XUTF8_CODEPAGE, lpCurrentDirectory);
+	lpwszDesktop = _xutf8_a2w_alloc(_XUTF8_CODEPAGE, sa->lpDesktop, NULL, 0);
+	lpwszTitle   = _xutf8_a2w_alloc(_XUTF8_CODEPAGE, sa->lpTitle, NULL, 0);
+	lpwszAppName = _xutf8_a2w_alloc(_XUTF8_CODEPAGE, lpApplicationName, NULL, 0);
+	lpwszCmdLine = _xutf8_a2w_alloc(_XUTF8_CODEPAGE, lpCommandLine, NULL, 0);
+	lpwszCurDir  = _xutf8_a2w_alloc(_XUTF8_CODEPAGE, lpCurrentDirectory, NULL, 0);
 
 	/* Convert environment block. */
 	lpwEnviron   = NULL;
@@ -807,13 +1041,13 @@ BOOL WINAPI xutf8_CreateProcessA(
 					break;
 		}
 		cnt = MultiByteToWideChar(_XUTF8_CODEPAGE, 0,
-				(char *)lpEnvironment, p - (char *)lpEnvironment, NULL, 0) + 1;
+				(char *)lpEnvironment, (int)(p - (char *)lpEnvironment), NULL, 0) + 1;
 		if (cnt > 0)
 		{
 			if ((lpwEnviron = (wchar_t *)xmalloc(cnt * sizeof(wchar_t))) != NULL)
 			{
 				cnt = MultiByteToWideChar(_XUTF8_CODEPAGE, 0,
-						(char *)lpEnvironment, p - (char *)lpEnvironment, lpwEnviron, cnt);
+						(char *)lpEnvironment, (int)(p - (char *)lpEnvironment), lpwEnviron, cnt);
 				if (cnt > 0)
 				{
 					dwCreationFlags |= CREATE_UNICODE_ENVIRONMENT;
@@ -866,6 +1100,120 @@ BOOL WINAPI xutf8_CreateProcessA(
 	free(lpwszCurDir);
 	if (lpwEnviron != (wchar_t *)lpEnvironment)
 		free(lpwEnviron);
+	return ret;
+}
+
+DWORD WINAPI xutf8_GetEnvironmentVariableA(LPCSTR lpName, LPSTR lpBuffer, DWORD nSize)
+{
+	int index;
+	char *str;
+	DWORD ret = 0;
+
+	_xutf8_env_lock(&_xutf8_environ);
+
+	index = _xutf8_env_lookup(_xutf8_environ, lpName, NULL);
+	if (index >= 0)
+	{
+		str = _xutf8_environ->tab[index];
+		str = strchr(str, '=') + 1;
+		ret = (DWORD)strlen(str);
+		if (lpBuffer != NULL && nSize > ret)
+			strcpy(lpBuffer, str);
+		else
+			ret++;
+	}
+	else
+	{
+		if (lpBuffer != NULL && nSize > 0)
+			lpBuffer[0] = '\0';
+		SetLastError(ERROR_ENVVAR_NOT_FOUND);
+	}
+
+	_xutf8_env_unlock(_xutf8_environ);
+	return ret;
+}
+
+BOOL WINAPI xutf8_SetEnvironmentVariableA(LPCSTR lpName, LPCSTR lpValue)
+{
+	wchar_t namebuf[_XUTF8_DEFENVNAM];
+	wchar_t valuebuf[_XUTF8_DEFENVVAL];
+	wchar_t *name, *val;
+	BOOL ret = FALSE;
+
+	if (lpName == NULL)
+		return FALSE;
+
+#if (_XUTF8_USE_WENV)
+	if (lpValue == NULL)
+		lpValue = "";
+#else /* !_XUTF8_USE_WENV */
+	if (lpValue != NULL && lpValue[0] == '\0')
+		lpValue = NULL;
+#endif /* _XUTF8_USE_WENV */
+
+	name = _xutf8_a2w_alloc(_XUTF8_CODEPAGE, lpName, namebuf, ARRAY_SIZE(namebuf));
+	if (lpValue)
+		val = _xutf8_a2w_alloc(_XUTF8_CODEPAGE, lpValue, valuebuf, ARRAY_SIZE(valuebuf));
+	else
+		val = NULL;
+	if (name)
+	{
+#if (_XUTF8_USE_WENV)
+		ret = !_wputenv_s(name, val);
+#else /* !_XUTF8_USE_WENV */
+		ret = SetEnvironmentVariableW(name, val);
+#endif /* _XUTF8_USE_WENV */
+	}
+	if (name != namebuf)
+		free(name);
+	if (val != valuebuf)
+		free(val);
+
+	if (ret)
+	{
+		_xutf8_env_lock(&_xutf8_environ);
+		ret = _xutf8_env_set(_xutf8_environ, lpName, lpValue) >= 0 ? TRUE : FALSE;
+		_xutf8_env_unlock(_xutf8_environ);
+	}
+	return ret;
+}
+
+BOOL WINAPI xutf8_SetEnvironmentVariableW(LPCWSTR lpName, LPCWSTR lpValue)
+{
+	char namebuf[_XUTF8_DEFENVNAM];
+	char valuebuf[_XUTF8_DEFENVVAL];
+	char *name, *val;
+	BOOL ret = FALSE;
+
+	if (lpName == NULL)
+		return FALSE;
+
+#if (_XUTF8_USE_WENV)
+	if (lpValue == NULL)
+		lpValue = L"";
+	if (_wputenv_s(lpName, lpValue) == 0)
+#else /* !_XUTF8_USE_WENV */
+	if (lpValue != NULL && lpValue[0] == '\0')
+		lpValue = NULL;
+	if (SetEnvironmentVariableW(lpName, lpValue))
+#endif /* _XUTF8_USE_WENV */
+	{
+		name = _xutf8_w2a_alloc(_XUTF8_CODEPAGE, lpName, namebuf, ARRAY_SIZE(namebuf));
+		if (lpValue)
+			val = _xutf8_w2a_alloc(_XUTF8_CODEPAGE, lpValue, valuebuf, ARRAY_SIZE(valuebuf));
+		else
+			val = NULL;
+		if (name)
+		{
+			_xutf8_env_lock(&_xutf8_environ);
+			ret = _xutf8_env_set(_xutf8_environ, name, val) >= 0 ? TRUE : FALSE;
+			_xutf8_env_unlock(_xutf8_environ);
+		}
+		if (name != namebuf)
+			free(name);
+		if (val != valuebuf)
+			free(val);
+	}
 	return ret;
 }
 
@@ -926,14 +1274,6 @@ char *xutf8_getcwd(char *pointer, int len)
 	return _xutf8_w2a(_XUTF8_CODEPAGE, ret, pointer, len);
 }
 
-#undef getenv
-char *xutf8_getenv(const char *name)
-{
-	char *ret = _xutf8_getenv(&_xutf8_environ, name);
-	return _xutf8_environ.env ? ret : getenv(name);
-}
-#define getenv xutf8_getenv
-
 int xutf8_rename(const char *pold, const char *pnew)
 {
 	wchar_t wstr1[_XUTF8_MAXWPATH];
@@ -941,9 +1281,133 @@ int xutf8_rename(const char *pold, const char *pnew)
 	return _wrename(_xutf82w(pold, wstr1), _xutf82w(pnew, wstr2));
 }
 
+int xutf8_chmod(const char *filename, int pmode)
+{
+	wchar_t wstr1[_XUTF8_MAXWPATH];
+	return _wchmod(_xutf82w(filename, wstr1), pmode);
+}
+
+int xutf8_access(const char *filename, int pmode)
+{
+	wchar_t wstr1[_XUTF8_MAXWPATH];
+	return _waccess(_xutf82w(filename, wstr1), pmode);
+}
+
+int xutf8_chdir(const char *path)
+{
+	wchar_t wstr1[_XUTF8_MAXWPATH];
+	return _wchdir(_xutf82w(path, wstr1));
+}
+
+char **xutf8_environ(void)
+{
+	char **env;
+	_xutf8_env_lock(&_xutf8_environ);
+	env = _xutf8_environ->tab;
+	_xutf8_env_unlock(_xutf8_environ);
+	return env;
+}
+
+char *xutf8_getenv(const char *name)
+{
+	int index;
+	char *ret = NULL;
+
+	_xutf8_env_lock(&_xutf8_environ);
+	index = _xutf8_env_lookup(_xutf8_environ, name, NULL);
+	if (index >= 0)
+		if ((ret = strchr(_xutf8_environ->tab[index], '=')) != NULL)
+			ret++;
+	_xutf8_env_unlock(_xutf8_environ);
+	return ret;
+}
+
+int xutf8_putenv(const char *envstring)
+{
+	char namebuf[_XUTF8_DEFENVNAM], *name;
+	const char *val;
+	int ret;
+
+	/* Get value */
+	if (envstring == NULL)
+		return EINVAL;
+	for (val = envstring; ; )
+	{
+		if (*val == '\0')
+			return EINVAL;
+		if (*val++ == '=')
+			break;
+	}
+
+	/* Duplicate name. */
+	if (val - envstring > ARRAY_SIZE(namebuf))
+		name = (char *)xmalloc((val - envstring) * sizeof(namebuf[0]));
+	else
+		name = namebuf;
+	if (name == NULL)
+		return ENOMEM;
+	memcpy(name, envstring, (val - envstring) * sizeof(namebuf[0]));
+	name[val - envstring - 1] = '\0';
+
+	ret = xutf8_putenv_s(name, val);
+
+	if (name != namebuf)
+		free(name);
+	return ret;
+}
+
+int xutf8_putenv_s(const char *name, const char *value)
+{
+	if (xutf8_SetEnvironmentVariableA(name, value))
+		return 0;
+	else
+		return EINVAL;
+}
+
+int xutf8_wputenv(const wchar_t *envstring)
+{
+	wchar_t namebuf[_XUTF8_DEFENVNAM], *name;
+	const wchar_t *val;
+	int ret;
+
+	/* Get value */
+	if (envstring == NULL)
+		return EINVAL;
+	for (val = envstring; ; )
+	{
+		if (*val == '\0')
+			return EINVAL;
+		if (*val++ == '=')
+			break;
+	}
+
+	/* Duplicate name. */
+	if (val - envstring > ARRAY_SIZE(namebuf))
+		name = (wchar_t *)xmalloc((val - envstring) * sizeof(namebuf[0]));
+	else
+		name = namebuf;
+	if (name == NULL)
+		return ENOMEM;
+	memcpy(name, envstring, (val - envstring) * sizeof(namebuf[0]));
+	name[val - envstring - 1] = '\0';
+
+	ret = xutf8_wputenv_s(name, val);
+
+	if (name != namebuf)
+		free(name);
+	return ret;
+}
+
+int xutf8_wputenv_s(const wchar_t *name, const wchar_t *value)
+{
+	if (xutf8_SetEnvironmentVariableW(name, value))
+		return 0;
+	else
+		return EINVAL;
+}
+
 /******************************************************************************/
 
-#include <shellapi.h>
 static void xutf8_startup(int argc, char **argv)
 {
 	wchar_t wpgm[_XUTF8_MAXWPATH];
@@ -953,62 +1417,34 @@ static void xutf8_startup(int argc, char **argv)
 	wargv = CommandLineToArgvW(GetCommandLineW(), &n);
 	if (wargv == NULL)
 		return;
+
 	/* Copy executable name to argv[0] */
 	wpgm[0] = '\0';
 	GetModuleFileNameW(NULL, wpgm, ARRAY_SIZE(wpgm));
 	if (wpgm[0])
-		argv[0] = _xutf8_w2a_alloc(_XUTF8_CODEPAGE, wpgm);
+		argv[0] = _xutf8_w2a_alloc(_XUTF8_CODEPAGE, wpgm, NULL, 0);
+
 	/* Copy arguments. */
 	if (n > argc)
 		n = argc;
 	for (i = 1; i < n; i++)
-		argv[i] = _xutf8_w2a_alloc(_XUTF8_CODEPAGE, wargv[i]);
+		argv[i] = _xutf8_w2a_alloc(_XUTF8_CODEPAGE, wargv[i], NULL, 0);
 	for (; i < argc; i++)
 		argv[i] = xstrdup("");
 	LocalFree(wargv);
+
+	/* Initial UTF8 environment. */
+	SetEnvironmentVariableA(_xutf8_env_name, NULL);
 }
 
-int mingw_putenv(const char *envstring)
-{
-	int ret = _xutf8_putenv(&_xutf8_environ, envstring);
-	return _xutf8_environ.env ? ret : _putenv(envstring);
-}
-
-char **mingw_environ(void)
-{
-	char **env;
-	_xutf8_env_lock(&_xutf8_environ);
-	env = _xutf8_environ.env;
-	_xutf8_env_unlock(&_xutf8_environ);
-	return env ? env : _environ;
-}
-
-int mingw_chmod(const char *filename, int pmode)
-{
-	wchar_t wstr1[_XUTF8_MAXWPATH];
-	return _wchmod(_xutf82w(filename, wstr1), pmode);
-}
-
-int mingw_access(const char *filename, int pmode)
-{
-	wchar_t wstr1[_XUTF8_MAXWPATH];
-	return _waccess(_xutf82w(filename, wstr1), pmode);
-}
-
-int mingw_chdir(const char *path)
-{
-	wchar_t wstr1[_XUTF8_MAXWPATH];
-	return _wchdir(_xutf82w(path, wstr1));
-}
-
-int mkstemp(char *template)
+int mkstemp(char *stemplate)
 {
 	wchar_t *filename;
 	wchar_t wstr1[_XUTF8_MAXWPATH];
-	filename = _wmktemp(_xutf82w(template, wstr1));
+	filename = _wmktemp(_xutf82w(stemplate, wstr1));
 	if (filename == NULL)
 		return -1;
-	_xutf8_w2a(_XUTF8_CODEPAGE, filename, template, strlen(template) + 1);
+	_xutf8_w2a(_XUTF8_CODEPAGE, filename, stemplate, (int)strlen(stemplate) + 1);
 	return _wopen(filename, O_RDWR | O_CREAT, 0600);
 }
 #define mkstemp _mkstemp_dummy
@@ -1017,30 +1453,8 @@ int mkstemp(char *template)
 
 #define xutf8_startup(argc, argv)	(void)0
 
-int mingw_putenv(const char *envstring)
-{
-	return _putenv(envstring);
-}
-
-char **mingw_environ(void)
-{
-	return _environ;
-}
-
-int mingw_chmod(const char *filename, int pmode)
-{
-	return _chmod(filename,pmode);
-}
-
-int mingw_access(const char *filename, int pmode)
-{
-	return _access(filename,pmode);
-}
-
-int mingw_chdir(const char *path)
-{
-	return _chdir(path);
-}
-
 #endif /* __XUTF8_ENABLED__ */
 
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif

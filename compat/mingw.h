@@ -165,23 +165,6 @@ int link(const char *oldpath, const char *newpath);
  * replacements of existing functions
  */
 
-/* For UTF-8. Added by Sprite Tong, 12/1/2011. */
-int mingw_putenv(const char *envstring);
-#undef  putenv
-#define putenv  mingw_putenv
-char **mingw_environ(void);
-#undef  environ
-#define environ mingw_environ()
-int mingw_chmod(const char *filename, int pmode);
-#undef  chmod
-#define chmod   mingw_chmod
-int mingw_access(const char *filename, int pmode);
-#undef  access
-#define access  mingw_access
-int mingw_chdir(const char *path);
-#undef  chdir
-#define chdir   mingw_chdir
-
 int mingw_unlink(const char *pathname);
 #define unlink mingw_unlink
 
@@ -369,3 +352,9 @@ extern int err_win_to_posix(DWORD winerr);
 
 extern const char *get_windows_home_directory();
 #define get_home_directory() get_windows_home_directory()
+
+/* For UTF-8. Added by Sprite Tong, 12/1/2011. */
+#ifndef __XUTF8_INIT__
+#define __XUTF8_GITPRJ__
+#include "win32_xutf8.h"
+#endif /* __XUTF8_INIT__ */

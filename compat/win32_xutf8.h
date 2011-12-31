@@ -1,6 +1,13 @@
 #ifndef __WIN32_XUTF8_H__
 #define __WIN32_XUTF8_H__
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <io.h>
+#ifdef __XUTF8_INIT__
+#include <Windows.h>
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -21,97 +28,159 @@ extern "C" {
 #if (_XUTF8_MAXPATH/2 < 1024)
 #define _XUTF8_MAXWPATH		1024
 #else
-#define _XUTF8_MAXWPATH	(_XUTF8_MAXPATH/2)
+#define _XUTF8_MAXWPATH		(_XUTF8_MAXPATH/2)
 #endif
 
-#define _XUTF8_DEFEVNNUM	512
-#define _XUTF8_DEFEVNVAL	256
-#define _XUTF8_EVNPOOLSIZE	65536
+#ifndef _XUTF8_USE_WENV
+#define _XUTF8_USE_WENV		TRUE
+#endif
+#define _XUTF8_DEFENVNUM	128
+#define _XUTF8_DEFENVNAM	64
+#define _XUTF8_DEFENVVAL	256
+#define _XUTF8_EVNPOOLSIZE	32768*2
 #define _XUTF8_CODEPAGE		CP_UTF8
 
 extern wchar_t *_xutf8_a2w(unsigned codepage, const char *src, wchar_t *dst, int dst_len);
 
 extern char *_xutf8_w2a(unsigned codepage, const wchar_t *src, char *dst, int dst_len);
 
-extern wchar_t *_xutf8_a2w_alloc(unsigned codepage, const char *src);
+extern wchar_t *_xutf8_a2w_alloc(unsigned codepage, const char *src,
+								 wchar_t *buf, int bufsz);
 
-extern char *_xutf8_w2a_alloc(unsigned codepage, const wchar_t *src);
+extern char *_xutf8_w2a_alloc(unsigned codepage, const wchar_t *src,
+							  char *buf, int bufsz);
 
 /******************************************************************************/
 
+#ifdef WINAPI
+
 HANDLE WINAPI xutf8_FindFirstFileA(LPCSTR,LPWIN32_FIND_DATAA);
-#define FindFirstFileA xutf8_FindFirstFileA
 
 BOOL WINAPI xutf8_FindNextFileA(HANDLE,LPWIN32_FIND_DATAA);
-#define FindNextFileA xutf8_FindNextFileA
 
 BOOL WINAPI xutf8_GetFileAttributesExA(LPCSTR,GET_FILEEX_INFO_LEVELS,PVOID);
-#define GetFileAttributesExA xutf8_GetFileAttributesExA
 
 DWORD WINAPI xutf8_GetFileAttributesA(LPCSTR);
-#define GetFileAttributesA xutf8_GetFileAttributesA
 
 BOOL WINAPI xutf8_SetFileAttributesA(LPCSTR,DWORD);
-#define SetFileAttributesA xutf8_SetFileAttributesA
 
 BOOL WINAPI xutf8_MoveFileExA(LPCSTR,LPCSTR,DWORD);
-#define MoveFileExA xutf8_MoveFileExA
 
 HANDLE WINAPI xutf8_CreateFileA(LPCSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,DWORD,DWORD,HANDLE);
-#define CreateFileA xutf8_CreateFileA
 
 int WINAPI xutf8_CreateHardLinkA(LPCSTR,LPCSTR,LPSECURITY_ATTRIBUTES);
-#define CreateHardLinkA xutf8_CreateHardLinkA
 
 BOOL WINAPI xutf8_CreateProcessA(LPCSTR,LPSTR,LPSECURITY_ATTRIBUTES,
 	LPSECURITY_ATTRIBUTES,BOOL,DWORD,PVOID,LPCSTR,LPSTARTUPINFOA,LPPROCESS_INFORMATION);
-#define CreateProcessA xutf8_CreateProcessA
+
+DWORD WINAPI xutf8_GetEnvironmentVariableA(LPCSTR lpName, LPSTR lpBuffer, DWORD nSize);
+
+BOOL WINAPI xutf8_SetEnvironmentVariableA(LPCSTR lpName, LPCSTR lpValue);
+
+BOOL WINAPI xutf8_SetEnvironmentVariableW(LPCWSTR lpName, LPCWSTR lpValue);
 
 //GetUserName
+
+#endif /* WINAPI */
 
 /******************************************************************************/
 
 int xutf8_unlink(const char *pathname);
-#undef  unlink
-#define unlink xutf8_unlink
 
 int xutf8_rmdir(const char *pathname);
-#undef  rmdir
-#define rmdir xutf8_rmdir
 
 int xutf8_mkdir(const char *path);
-#undef  mkdir
-#define mkdir xutf8_mkdir
 
 int xutf8_open(const char *filename, int oflags, ...);
-#undef  open
-#define open xutf8_open
 
 FILE *xutf8_fopen(const char *filename, const char *otype);
-#undef  fopen
-#define fopen xutf8_fopen
 
 FILE *xutf8_freopen(const char *filename, const char *otype, FILE *stream);
-#undef  freopen
-#define freopen xutf8_freopen
 
 char *xutf8_getcwd(char *pointer, int len);
-#undef  getcwd
-#define getcwd xutf8_getcwd
-
-char *xutf8_getenv(const char *name);
-#undef  getenv
-#define getenv xutf8_getenv
 
 int xutf8_rename(const char *pold, const char *pnew);
-#undef  rename
-#define rename xutf8_rename
 
-#endif /* __XUTF8_ENABLED__ */
+int xutf8_chmod(const char *filename, int pmode);
+
+int xutf8_access(const char *filename, int pmode);
+
+int xutf8_chdir(const char *path);
+
+char **xutf8_environ(void);
+
+char *xutf8_getenv(const char *name);
+
+int xutf8_putenv(const char *envstring);
+
+int xutf8_putenv_s(const char *name, const char *value);
+
+int xutf8_wputenv(const wchar_t *envstring);
+
+int xutf8_wputenv_s(const wchar_t *name, const wchar_t *value);
 
 #ifdef __XUTF8_INIT__
 #include "win32_xutf8.c"
 #endif /* __XUTF8_INIT__ */
+
+#ifdef WINAPI
+#define FindFirstFileA			xutf8_FindFirstFileA
+#define FindNextFileA			xutf8_FindNextFileA
+#define GetFileAttributesExA	xutf8_GetFileAttributesExA
+#define GetFileAttributesA		xutf8_GetFileAttributesA
+#define SetFileAttributesA		xutf8_SetFileAttributesA
+#define MoveFileExA				xutf8_MoveFileExA
+#define CreateFileA				xutf8_CreateFileA
+#define CreateHardLinkA			xutf8_CreateHardLinkA
+#define CreateProcessA			xutf8_CreateProcessA
+#define GetEnvironmentVariableA	xutf8_GetEnvironmentVariableA
+#define SetEnvironmentVariableA	xutf8_SetEnvironmentVariableA
+#define SetEnvironmentVariableW	xutf8_SetEnvironmentVariableW
+#endif /* WINAPI */
+
+#if defined(__XUTF8_INIT__) || !defined(__XUTF8_GITPRJ__)
+	#undef  unlink
+	#define unlink				xutf8_unlink
+	#undef  rmdir
+	#define rmdir				xutf8_rmdir
+	#undef  mkdir
+	#define mkdir				xutf8_mkdir
+	#undef  open
+	#define open				xutf8_open
+	#undef  fopen
+	#define fopen				xutf8_fopen
+	#undef  freopen
+	#define freopen				xutf8_freopen
+	#undef  getcwd
+	#define getcwd				xutf8_getcwd
+	#undef  rename
+	#define rename				xutf8_rename
+	#undef  getenv
+	#define getenv				xutf8_getenv
+#endif /* defined(__XUTF8_INIT__) || !defined(__XUTF8_GITPRJ__) */
+
+#undef  chmod
+#define chmod					xutf8_chmod
+#undef  access
+#define access					xutf8_access
+#undef  chdir
+#define chdir					xutf8_chdir
+#undef  environ
+#define environ					xutf8_environ()
+#undef  _environ
+#define _environ				xutf8_environ()
+#undef  putenv
+#define putenv					xutf8_putenv
+#undef  _putenv
+#define _putenv					xutf8_putenv
+#undef  _putenv_s
+#define _putenv_s				xutf8_putenv_s
+#undef  _wputenv
+#define _wputenv				xutf8_wputenv
+#undef  _wputenv_s
+#define _wputenv_s				xutf8_wputenv_s
+
+#endif /* __XUTF8_ENABLED__ */
 
 #ifdef __cplusplus
 }

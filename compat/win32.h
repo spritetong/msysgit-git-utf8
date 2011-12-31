@@ -5,7 +5,10 @@
 #ifndef WIN32         /* Not defined by Cygwin */
 #include <windows.h>
 #endif
-#include "win32_xutf8.h" /* For UTF-8. Added by Sprite Tong, 12/1/2011. */
+
+/* For UTF-8. Added by Sprite Tong, 12/1/2011. */
+#define __XUTF8_GITPRJ__
+#include "win32_xutf8.h"
 
 static inline int file_attr_to_st_mode (DWORD attr)
 {
