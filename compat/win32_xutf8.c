@@ -709,7 +709,7 @@ static int _xutf8_env_lookup(xutf8_env_t *env, const char *name, int *insert_pos
 			if (cname == '\0')
 			{
 				if (centry == '=')
-					return m;
+					return (int)m;
 			}
 			if (centry >= 'A' && centry <= 'Z')
 				centry += 'a' - 'A';
@@ -723,7 +723,7 @@ static int _xutf8_env_lookup(xutf8_env_t *env, const char *name, int *insert_pos
 			l = m + 1;
 	}
 	if (insert_pos)
-		*insert_pos = l;
+		*insert_pos = (int)l;
 	return -1;
 }
 
@@ -1019,6 +1019,7 @@ BOOL WINAPI xutf8_CreateProcessA(
 	wchar_t *lpwszDesktop, *lpwszTitle, *lpwszAppName, *lpwszCmdLine, *lpwszCurDir, *lpwEnviron;
 	char *p;
 	int cnt;
+	DWORD lasterr;
 
 	if (sa == NULL)
 		return FALSE;
@@ -1092,6 +1093,7 @@ BOOL WINAPI xutf8_CreateProcessA(
 		lpwszCurDir,
 		&si,
 		lpProcessInformation);
+	lasterr = GetLastError();
 
 	free(lpwszDesktop);
 	free(lpwszTitle);
@@ -1100,6 +1102,8 @@ BOOL WINAPI xutf8_CreateProcessA(
 	free(lpwszCurDir);
 	if (lpwEnviron != (wchar_t *)lpEnvironment)
 		free(lpwEnviron);
+
+	SetLastError(lasterr);
 	return ret;
 }
 
@@ -1108,6 +1112,10 @@ DWORD WINAPI xutf8_GetEnvironmentVariableA(LPCSTR lpName, LPSTR lpBuffer, DWORD 
 	int index;
 	char *str;
 	DWORD ret = 0;
+	DWORD lasterr = ERROR_ENVVAR_NOT_FOUND;
+
+	if (lpName == NULL)
+		goto done;
 
 	_xutf8_env_lock(&_xutf8_environ);
 
@@ -1118,18 +1126,26 @@ DWORD WINAPI xutf8_GetEnvironmentVariableA(LPCSTR lpName, LPSTR lpBuffer, DWORD 
 		str = strchr(str, '=') + 1;
 		ret = (DWORD)strlen(str);
 		if (lpBuffer != NULL && nSize > ret)
+		{
 			strcpy(lpBuffer, str);
+			lasterr = ERROR_SUCCESS;
+		}
 		else
+		{
 			ret++;
+			lasterr = ERROR_INSUFFICIENT_BUFFER;
+		}
 	}
 	else
 	{
 		if (lpBuffer != NULL && nSize > 0)
 			lpBuffer[0] = '\0';
-		SetLastError(ERROR_ENVVAR_NOT_FOUND);
 	}
 
 	_xutf8_env_unlock(_xutf8_environ);
+
+done:
+	SetLastError(lasterr);
 	return ret;
 }
 
@@ -1139,9 +1155,13 @@ BOOL WINAPI xutf8_SetEnvironmentVariableA(LPCSTR lpName, LPCSTR lpValue)
 	wchar_t valuebuf[_XUTF8_DEFENVVAL];
 	wchar_t *name, *val;
 	BOOL ret = FALSE;
+	DWORD lasterr = ERROR_NOT_ENOUGH_MEMORY;
 
 	if (lpName == NULL)
-		return FALSE;
+	{
+		lasterr = ERROR_INVALID_NAME;
+		goto done;
+	}
 
 #if (_XUTF8_USE_WENV)
 	if (lpValue == NULL)
@@ -1160,8 +1180,11 @@ BOOL WINAPI xutf8_SetEnvironmentVariableA(LPCSTR lpName, LPCSTR lpValue)
 	{
 #if (_XUTF8_USE_WENV)
 		ret = !_wputenv_s(name, val);
+		if (ret)
+			lasterr = ERROR_SUCCESS;
 #else /* !_XUTF8_USE_WENV */
 		ret = SetEnvironmentVariableW(name, val);
+		lasterr = ret ? ERROR_SUCCESS : GetLastError();
 #endif /* _XUTF8_USE_WENV */
 	}
 	if (name != namebuf)
@@ -1174,7 +1197,11 @@ BOOL WINAPI xutf8_SetEnvironmentVariableA(LPCSTR lpName, LPCSTR lpValue)
 		_xutf8_env_lock(&_xutf8_environ);
 		ret = _xutf8_env_set(_xutf8_environ, lpName, lpValue) >= 0 ? TRUE : FALSE;
 		_xutf8_env_unlock(_xutf8_environ);
+		lasterr = ret ? ERROR_SUCCESS : ERROR_NOT_ENOUGH_MEMORY;
 	}
+
+done:
+	SetLastError(lasterr);
 	return ret;
 }
 
@@ -1184,9 +1211,13 @@ BOOL WINAPI xutf8_SetEnvironmentVariableW(LPCWSTR lpName, LPCWSTR lpValue)
 	char valuebuf[_XUTF8_DEFENVVAL];
 	char *name, *val;
 	BOOL ret = FALSE;
+	DWORD lasterr = ERROR_NOT_ENOUGH_MEMORY;
 
 	if (lpName == NULL)
-		return FALSE;
+	{
+		lasterr = ERROR_INVALID_NAME;
+		goto done;
+	}
 
 #if (_XUTF8_USE_WENV)
 	if (lpValue == NULL)
@@ -1208,12 +1239,17 @@ BOOL WINAPI xutf8_SetEnvironmentVariableW(LPCWSTR lpName, LPCWSTR lpValue)
 			_xutf8_env_lock(&_xutf8_environ);
 			ret = _xutf8_env_set(_xutf8_environ, name, val) >= 0 ? TRUE : FALSE;
 			_xutf8_env_unlock(_xutf8_environ);
+			if (ret)
+				lasterr = ERROR_SUCCESS;
 		}
 		if (name != namebuf)
 			free(name);
 		if (val != valuebuf)
 			free(val);
 	}
+
+done:
+	SetLastError(lasterr);
 	return ret;
 }
 
@@ -1307,7 +1343,10 @@ char *xutf8_mktemp(char *stemplate)
 #else
 	if (_wmktemp(_xutf82w(stemplate, wstr1)) == NULL)
 #endif
+	{
+		errno = EINVAL;
 		return NULL;
+	}
 	_xutf8_w2a(_XUTF8_CODEPAGE, wstr1, stemplate, (int)strlen(stemplate) + 1);
 	return stemplate;
 }
@@ -1320,17 +1359,24 @@ int xutf8_mktemp_s(char *stemplate, size_t size)
 #else
 	if (_wmktemp(_xutf82w(stemplate, wstr1)) == NULL)
 #endif
-		return -1;
-	_xutf8_w2a(_XUTF8_CODEPAGE, wstr1, stemplate, size);
+	{
+		errno = EINVAL;
+		return EINVAL;
+	}
+	_xutf8_w2a(_XUTF8_CODEPAGE, wstr1, stemplate, (int)size);
 	return 0;
 }
 
 char **xutf8_environ(void)
 {
 	char **env;
+
 	_xutf8_env_lock(&_xutf8_environ);
 	env = _xutf8_environ->tab;
 	_xutf8_env_unlock(_xutf8_environ);
+
+	if (env == NULL)
+		errno = EINVAL;
 	return env;
 }
 
@@ -1345,6 +1391,31 @@ char *xutf8_getenv(const char *name)
 		if ((ret = strchr(_xutf8_environ->tab[index], '=')) != NULL)
 			ret++;
 	_xutf8_env_unlock(_xutf8_environ);
+
+	if (ret == NULL)
+		errno = EINVAL;
+	return ret;
+}
+
+int xutf8_getenv_s(size_t *pReturnValue, char* buffer, size_t sizeInBytes,
+				   const char *varname)
+{
+	int ret = EINVAL;
+	
+	if ((pReturnValue == NULL) ||
+		(buffer == NULL && sizeInBytes > 0) ||
+		(varname == NULL))
+	{
+		goto done;
+	}
+
+	*pReturnValue = xutf8_GetEnvironmentVariableA(varname, buffer, (DWORD)sizeInBytes);
+	if (*pReturnValue > 0 && *pReturnValue <= sizeInBytes)
+		ret = 0;
+
+done:
+	if (ret != 0)
+		errno = ret;
 	return ret;
 }
 
@@ -1354,13 +1425,20 @@ int xutf8_putenv(const char *envstring)
 	const char *val;
 	int ret;
 
-	/* Get value */
 	if (envstring == NULL)
-		return EINVAL;
+	{
+		ret = EINVAL;
+		goto done;
+	}
+
+	/* Get value */
 	for (val = envstring; ; )
 	{
 		if (*val == '\0')
-			return EINVAL;
+		{
+			ret = EINVAL;
+			goto done;
+		}
 		if (*val++ == '=')
 			break;
 	}
@@ -1371,7 +1449,10 @@ int xutf8_putenv(const char *envstring)
 	else
 		name = namebuf;
 	if (name == NULL)
-		return ENOMEM;
+	{
+		ret = ENOMEM;
+		goto done;
+	}
 	memcpy(name, envstring, (val - envstring) * sizeof(namebuf[0]));
 	name[val - envstring - 1] = '\0';
 
@@ -1379,15 +1460,21 @@ int xutf8_putenv(const char *envstring)
 
 	if (name != namebuf)
 		free(name);
+
+done:
+	if (ret != 0)
+		errno = ret;
 	return ret;
 }
 
 int xutf8_putenv_s(const char *name, const char *value)
 {
-	if (xutf8_SetEnvironmentVariableA(name, value))
-		return 0;
-	else
+	if (!xutf8_SetEnvironmentVariableA(name, value))
+	{
+		errno = EINVAL;
 		return EINVAL;
+	}
+	return 0;
 }
 
 int xutf8_wputenv(const wchar_t *envstring)
@@ -1396,13 +1483,20 @@ int xutf8_wputenv(const wchar_t *envstring)
 	const wchar_t *val;
 	int ret;
 
-	/* Get value */
 	if (envstring == NULL)
-		return EINVAL;
+	{
+		ret = EINVAL;
+		goto done;
+	}
+
+	/* Get value */
 	for (val = envstring; ; )
 	{
 		if (*val == '\0')
-			return EINVAL;
+		{
+			ret = EINVAL;
+			goto done;
+		}
 		if (*val++ == '=')
 			break;
 	}
@@ -1413,7 +1507,10 @@ int xutf8_wputenv(const wchar_t *envstring)
 	else
 		name = namebuf;
 	if (name == NULL)
-		return ENOMEM;
+	{
+		ret = ENOMEM;
+		goto done;
+	}
 	memcpy(name, envstring, (val - envstring) * sizeof(namebuf[0]));
 	name[val - envstring - 1] = '\0';
 
@@ -1421,15 +1518,21 @@ int xutf8_wputenv(const wchar_t *envstring)
 
 	if (name != namebuf)
 		free(name);
+
+done:
+	if (ret != 0)
+		errno = EINVAL;
 	return ret;
 }
 
 int xutf8_wputenv_s(const wchar_t *name, const wchar_t *value)
 {
-	if (xutf8_SetEnvironmentVariableW(name, value))
-		return 0;
-	else
+	if (!xutf8_SetEnvironmentVariableW(name, value))
+	{
+		errno = EINVAL;
 		return EINVAL;
+	}
+	return 0;
 }
 
 /******************************************************************************/

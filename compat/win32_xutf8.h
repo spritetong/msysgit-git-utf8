@@ -115,6 +115,9 @@ char **xutf8_environ(void);
 
 char *xutf8_getenv(const char *name);
 
+int xutf8_getenv_s(size_t *pReturnValue, char* buffer, size_t sizeInBytes,
+				   const char *varname);
+
 int xutf8_putenv(const char *envstring);
 
 int xutf8_putenv_s(const char *name, const char *value);
@@ -203,6 +206,8 @@ int xutf8_wputenv_s(const wchar_t *name, const wchar_t *value);
 #define environ					xutf8_environ()
 #undef  _environ
 #define _environ				xutf8_environ()
+#undef  getenv_s
+#define getenv_s				xutf8_getenv_s
 #undef  putenv
 #define putenv					xutf8_putenv
 #undef  _putenv
