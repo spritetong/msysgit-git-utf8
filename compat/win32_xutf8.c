@@ -579,8 +579,15 @@ typedef struct _xutf8_env_struct
 	int			capacity;
 } xutf8_env_t;
 
-static const char _xutf8_env_guid[] = "196D57D9-0717-4F20-95DD-58D0297A402C";
-static const char _xutf8_env_name[] = "__GIT_XUTF8_ENV__";
+typedef struct _xutf8_env_hdr_struct
+{
+	HANDLE		hsem;
+	HANDLE		hmap;
+	void		*poolbuf;
+	xutf8_env_t *env;
+} xutf8_env_hdr_t;
+
+static const char _xutf8_env_guid[] = "{196D57D9-0717-4F20-95DD-58D0297A402C}";
 
 static xutf8_env_t *_xutf8_environ;
 static HANDLE _xutf8_env_sem;
@@ -615,8 +622,6 @@ static char **_xutf8_clonewenv(xutf8_env_t **ppdst, wchar_t *src)
 		/* Free the environment control block. */
 		if (dst->tab)
 		{
-			/* Unset the relative environment variable. */
-			SetEnvironmentVariableA(_xutf8_env_name, NULL);
 			/* Free memory pool. */
 			_xutf8_env_free(dst->tab);
 			dst->tab = NULL;
@@ -805,22 +810,23 @@ static void _xutf8_env_lock(xutf8_env_t **ppenv)
 {
 	char buf[64], *p;
 	wchar_t *wenv;
-	DWORD ret;
-	HANDLE sem = NULL;
+	HANDLE sem = NULL, hmap;
 	xutf8_env_t *env = NULL;
-	const int pool_size = _XUTF8_EVNPOOLSIZE;
+	xutf8_env_hdr_t *hdr = NULL;
+	const size_t pool_size = _XUTF8_EVNPOOLSIZE;
 
 	sem = (HANDLE)InterlockedCompareExchangePointer((void**)&_xutf8_env_sem, NULL, NULL);
 
 	/* Get the lock if it exists. Otherwize, create it. */
 	if (sem == NULL || WaitForSingleObject(sem, INFINITE) != WAIT_OBJECT_0)
 	{
-		/* Make unique semaphore name. Format: "%s-%X". */
+		/* Make unique semaphore name. Format: "%s-%.8X-SEM". */
 		p = buf;
 		strcpy(p, _xutf8_env_guid);
-		p += ARRAY_SIZE(_xutf8_env_guid) - 1;
-		*p++ = '-';
+		p += strlen(p);
 		_xutf8_hex2str(p, GetCurrentProcessId(), sizeof(DWORD) * 2);
+		p += strlen(p);
+		strcpy(p, "-SEM");
 
 		sem = CreateSemaphoreA(NULL, 0, 1, buf);
 		if (sem == NULL)
@@ -832,21 +838,25 @@ static void _xutf8_env_lock(xutf8_env_t **ppenv)
 			CloseHandle(sem);
 			sem = NULL;
 
-			/* Get the environment control block from the environment variable. */
-			ret = GetEnvironmentVariableA(_xutf8_env_name, buf, ARRAY_SIZE(buf));
-			if (ret > 0 && ret < ARRAY_SIZE(buf))
+			/* Get the environment control block from the shared memory. */
+			strcpy(p, "-MAP");
+			hmap = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL,
+									  PAGE_READWRITE,
+									  0, pool_size, buf);
+			if (hmap != NULL)
 			{
-				p = buf;
-				if (*p++ == '#' && (DWORD)_xutf8_str2hex(p, &p) == GetCurrentProcessId())
+				hdr = (xutf8_env_hdr_t *)MapViewOfFile(hmap, FILE_MAP_ALL_ACCESS,
+													   0, 0, pool_size);
+				if (hdr)
 				{
-					if (*p++ == ':')
+					if ((env = hdr->env) != NULL)
 					{
-						sem = (HANDLE)_xutf8_str2hex(p, &p);
-						(void)InterlockedExchangePointer((void **)&_xutf8_env_sem, sem);
-						if (*p++ == ':')
-							*ppenv = env = (xutf8_env_t *)_xutf8_str2hex(p, NULL);
+						*ppenv = env;
+						(void)InterlockedExchangePointer((void **)&_xutf8_env_sem, hdr->hsem);
 					}
+					UnmapViewOfFile(hdr);
 				}
+				CloseHandle(hmap);
 			}
 		}
 		else
@@ -857,32 +867,43 @@ static void _xutf8_env_lock(xutf8_env_t **ppenv)
 
 	if ((env = *ppenv) == NULL)
 	{
-		/* Allocate memory for pool. */
-		env = (xutf8_env_t *)LocalAlloc(LPTR, sizeof(xutf8_env_t) + pool_size);
-		if (env == NULL)
-			return;
-		env->tab      = NULL;
-		env->count    = 0;
-		env->capacity = 0;
-		*ppenv        = env;
-
-		/* Set the semaphore's handle and the pool buffer's address as an environment vairaible.
-		   Format: "#%X:%p:%p". */
+		/* Make unique file mapping name. Format: "%s-%.8X-MAP". */
 		p = buf;
-		*p++ = '#';
-		p = _xutf8_hex2str(p, GetCurrentProcessId(), sizeof(DWORD) * 2);
-		*p++ = ':';
-		p = _xutf8_hex2str(p, (size_t)sem, sizeof(HANDLE) * 2);
-		*p++ = ':';
-		p = _xutf8_hex2str(p, (size_t)env, sizeof(void *) * 2);
-		SetEnvironmentVariableA(_xutf8_env_name, buf);
+		strcpy(p, _xutf8_env_guid);
+		p += strlen(p);
+		_xutf8_hex2str(p, GetCurrentProcessId(), sizeof(DWORD) * 2);
+		p += strlen(p);
+		strcpy(p, "-MAP");
 
-		/* Initialize memory pool and UTF-8 environemnt control block. */
-		mem_pool_init(&env->pool, env + 1, pool_size);
-		if ((wenv = GetEnvironmentStringsW()) != NULL)
+		/* Allocate shared memory. */
+		hmap = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL,
+									PAGE_READWRITE,
+									0, pool_size, buf);
+		if (hmap != NULL)
 		{
-			_xutf8_clonewenv(ppenv, wenv);
-			FreeEnvironmentStringsW(wenv);
+			hdr = (xutf8_env_hdr_t *)MapViewOfFile(hmap, FILE_MAP_ALL_ACCESS,
+													0, 0, pool_size);
+			if (hdr)
+			{
+				hdr->hsem     = _xutf8_env_sem;
+				hdr->env      = (xutf8_env_t *)(hdr + 1);
+				hdr->hmap     = hmap;
+				hdr->poolbuf  = hdr;
+
+				/* Initialize memory pool and UTF-8 environemnt control block. */
+				env = *ppenv  = hdr->env;
+				env->tab      = NULL;
+				env->count    = 0;
+				env->capacity = 0;
+				mem_pool_init(&env->pool, env + 1, pool_size - sizeof(xutf8_env_hdr_t) - sizeof(xutf8_env_t));
+				if ((wenv = GetEnvironmentStringsW()) != NULL)
+				{
+					_xutf8_clonewenv(ppenv, wenv);
+					FreeEnvironmentStringsW(wenv);
+				}
+			}
+			else
+				CloseHandle(hmap);
 		}
 	}
 }
@@ -1561,9 +1582,6 @@ static void xutf8_startup(int argc, char **argv)
 	for (; i < argc; i++)
 		argv[i] = xstrdup("");
 	LocalFree(wargv);
-
-	/* Initial UTF8 environment. */
-	SetEnvironmentVariableA(_xutf8_env_name, NULL);
 }
 
 #else /* !__XUTF8_ENABLED__ */
