@@ -1598,7 +1598,7 @@ static const char *format_time(unsigned long time, const char *tz_str,
 	int tz;
 
 	if (show_raw_time) {
-		sprintf(time_buf, "%lu %s", time, tz_str);
+		snprintf(time_buf, sizeof(time_buf), "%lu %s", time, tz_str);
 	}
 	else {
 		tz = atoi(tz_str);
@@ -2050,14 +2050,8 @@ static int git_blame_config(const char *var, const char *value, void *cb)
 		return 0;
 	}
 
-	switch (userdiff_config(var, value)) {
-	case 0:
-		break;
-	case -1:
+	if (userdiff_config(var, value) < 0)
 		return -1;
-	default:
-		return 0;
-	}
 
 	return git_default_config(var, value, cb);
 }

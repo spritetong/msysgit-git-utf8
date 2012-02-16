@@ -18,16 +18,11 @@
 #include "refs.h"
 #include "thread-utils.h"
 
-static const char pack_usage[] =
-  "git pack-objects [ -q | --progress | --all-progress ]\n"
-  "        [--all-progress-implied]\n"
-  "        [--max-pack-size=<n>] [--local] [--incremental]\n"
-  "        [--window=<n>] [--window-memory=<n>] [--depth=<n>]\n"
-  "        [--no-reuse-delta] [--no-reuse-object] [--delta-base-offset]\n"
-  "        [--threads=<n>] [--non-empty] [--revs [--unpacked | --all]]\n"
-  "        [--reflog] [--stdout | base-name] [--include-tag]\n"
-  "        [--keep-unreachable | --unpack-unreachable]\n"
-  "        [< ref-list | < object-list]";
+static const char *pack_usage[] = {
+	"git pack-objects --stdout [options...] [< ref-list | < object-list]",
+	"git pack-objects [options...] base-name [< ref-list | < object-list]",
+	NULL
+};
 
 struct object_entry {
 	struct pack_idx_entry idx;
@@ -76,7 +71,7 @@ static struct pack_idx_option pack_idx_opts;
 static const char *base_name;
 static int progress = 1;
 static int window = 10;
-static unsigned long pack_size_limit, pack_size_limit_cfg;
+static unsigned long pack_size_limit;
 static int depth = 50;
 static int delta_search_threads;
 static int pack_to_stdout;
@@ -638,7 +633,6 @@ static void write_pack_file(void)
 	uint32_t i = 0, j;
 	struct sha1file *f;
 	off_t offset;
-	struct pack_header hdr;
 	uint32_t nr_remaining = nr_result;
 	time_t last_mtime = 0;
 	struct object_entry **write_order;
@@ -652,22 +646,14 @@ static void write_pack_file(void)
 		unsigned char sha1[20];
 		char *pack_tmp_name = NULL;
 
-		if (pack_to_stdout) {
+		if (pack_to_stdout)
 			f = sha1fd_throughput(1, "<stdout>", progress_state);
-		} else {
-			char tmpname[PATH_MAX];
-			int fd;
-			fd = odb_mkstemp(tmpname, sizeof(tmpname),
-					 "pack/tmp_pack_XXXXXX");
-			pack_tmp_name = xstrdup(tmpname);
-			f = sha1fd(fd, pack_tmp_name);
-		}
+		else
+			f = create_tmp_packfile(&pack_tmp_name);
 
-		hdr.hdr_signature = htonl(PACK_SIGNATURE);
-		hdr.hdr_version = htonl(PACK_VERSION);
-		hdr.hdr_entries = htonl(nr_remaining);
-		sha1write(f, &hdr, sizeof(hdr));
-		offset = sizeof(hdr);
+		offset = write_pack_header(f, nr_remaining);
+		if (!offset)
+			die_errno("unable to write pack header");
 		nr_written = 0;
 		for (; i < nr_objects; i++) {
 			struct object_entry *e = write_order[i];
@@ -693,19 +679,7 @@ static void write_pack_file(void)
 
 		if (!pack_to_stdout) {
 			struct stat st;
-			const char *idx_tmp_name;
 			char tmpname[PATH_MAX];
-
-			idx_tmp_name = write_idx_file(NULL, written_list, nr_written,
-						      &pack_idx_opts, sha1);
-
-			snprintf(tmpname, sizeof(tmpname), "%s-%s.pack",
-				 base_name, sha1_to_hex(sha1));
-			free_pack_by_name(tmpname);
-			if (adjust_shared_perm(pack_tmp_name))
-				die_errno("unable to make temporary pack file readable");
-			if (rename(pack_tmp_name, tmpname))
-				die_errno("unable to rename temporary pack file");
 
 			/*
 			 * Packs are runtime accessed in their mtime
@@ -714,28 +688,27 @@ static void write_pack_file(void)
 			 * packs then we should modify the mtime of later ones
 			 * to preserve this property.
 			 */
-			if (stat(tmpname, &st) < 0) {
+			if (stat(pack_tmp_name, &st) < 0) {
 				warning("failed to stat %s: %s",
-					tmpname, strerror(errno));
+					pack_tmp_name, strerror(errno));
 			} else if (!last_mtime) {
 				last_mtime = st.st_mtime;
 			} else {
 				struct utimbuf utb;
 				utb.actime = st.st_atime;
 				utb.modtime = --last_mtime;
-				if (utime(tmpname, &utb) < 0)
+				if (utime(pack_tmp_name, &utb) < 0)
 					warning("failed utime() on %s: %s",
 						tmpname, strerror(errno));
 			}
 
-			snprintf(tmpname, sizeof(tmpname), "%s-%s.idx",
-				 base_name, sha1_to_hex(sha1));
-			if (adjust_shared_perm(idx_tmp_name))
-				die_errno("unable to make temporary index file readable");
-			if (rename(idx_tmp_name, tmpname))
-				die_errno("unable to rename temporary index file");
-
-			free((void *) idx_tmp_name);
+			/* Enough space for "-<sha-1>.pack"? */
+			if (sizeof(tmpname) <= strlen(base_name) + 50)
+				die("pack base name '%s' too long", base_name);
+			snprintf(tmpname, sizeof(tmpname), "%s-", base_name);
+			finish_tmp_packfile(tmpname, pack_tmp_name,
+					    written_list, nr_written,
+					    &pack_idx_opts, sha1);
 			free(pack_tmp_name);
 			puts(sha1_to_hex(sha1));
 		}
@@ -1456,11 +1429,16 @@ static int try_delta(struct unpacked *trg, struct unpacked *src,
 		return -1;
 
 	/*
-	 * We do not bother to try a delta that we discarded
-	 * on an earlier try, but only when reusing delta data.
+	 * We do not bother to try a delta that we discarded on an
+	 * earlier try, but only when reusing delta data.  Note that
+	 * src_entry that is marked as the preferred_base should always
+	 * be considered, as even if we produce a suboptimal delta against
+	 * it, we will still save the transfer cost, as we already know
+	 * the other side has it and we won't send src_entry at all.
 	 */
 	if (reuse_delta && trg_entry->in_pack &&
 	    trg_entry->in_pack == src_entry->in_pack &&
+	    !src_entry->preferred_base &&
 	    trg_entry->in_pack_type != OBJ_REF_DELTA &&
 	    trg_entry->in_pack_type != OBJ_OFS_DELTA)
 		return 0;
@@ -2098,10 +2076,6 @@ static int git_pack_config(const char *k, const char *v, void *cb)
 			    pack_idx_opts.version);
 		return 0;
 	}
-	if (!strcmp(k, "pack.packsizelimit")) {
-		pack_size_limit_cfg = git_config_ulong(k, v);
-		return 0;
-	}
 	return git_default_config(k, v, cb);
 }
 
@@ -2326,23 +2300,112 @@ static void get_object_list(int ac, const char **av)
 		loosen_unused_packed_objects(&revs);
 }
 
+static int option_parse_index_version(const struct option *opt,
+				      const char *arg, int unset)
+{
+	char *c;
+	const char *val = arg;
+	pack_idx_opts.version = strtoul(val, &c, 10);
+	if (pack_idx_opts.version > 2)
+		die(_("unsupported index version %s"), val);
+	if (*c == ',' && c[1])
+		pack_idx_opts.off32_limit = strtoul(c+1, &c, 0);
+	if (*c || pack_idx_opts.off32_limit & 0x80000000)
+		die(_("bad index version '%s'"), val);
+	return 0;
+}
+
+static int option_parse_ulong(const struct option *opt,
+			      const char *arg, int unset)
+{
+	if (unset)
+		die(_("option %s does not accept negative form"),
+		    opt->long_name);
+
+	if (!git_parse_ulong(arg, opt->value))
+		die(_("unable to parse value '%s' for option %s"),
+		    arg, opt->long_name);
+	return 0;
+}
+
+#define OPT_ULONG(s, l, v, h) \
+	{ OPTION_CALLBACK, (s), (l), (v), "n", (h),	\
+	  PARSE_OPT_NONEG, option_parse_ulong }
+
 int cmd_pack_objects(int argc, const char **argv, const char *prefix)
 {
 	int use_internal_rev_list = 0;
 	int thin = 0;
 	int all_progress_implied = 0;
-	uint32_t i;
-	const char **rp_av;
-	int rp_ac_alloc = 64;
-	int rp_ac;
+	const char *rp_av[6];
+	int rp_ac = 0;
+	int rev_list_unpacked = 0, rev_list_all = 0, rev_list_reflog = 0;
+	struct option pack_objects_options[] = {
+		OPT_SET_INT('q', "quiet", &progress,
+			    "do not show progress meter", 0),
+		OPT_SET_INT(0, "progress", &progress,
+			    "show progress meter", 1),
+		OPT_SET_INT(0, "all-progress", &progress,
+			    "show progress meter during object writing phase", 2),
+		OPT_BOOL(0, "all-progress-implied",
+			 &all_progress_implied,
+			 "similar to --all-progress when progress meter is shown"),
+		{ OPTION_CALLBACK, 0, "index-version", NULL, "version[,offset]",
+		  "write the pack index file in the specified idx format version",
+		  0, option_parse_index_version },
+		OPT_ULONG(0, "max-pack-size", &pack_size_limit,
+			  "maximum size of each output pack file"),
+		OPT_BOOL(0, "local", &local,
+			 "ignore borrowed objects from alternate object store"),
+		OPT_BOOL(0, "incremental", &incremental,
+			 "ignore packed objects"),
+		OPT_INTEGER(0, "window", &window,
+			    "limit pack window by objects"),
+		OPT_ULONG(0, "window-memory", &window_memory_limit,
+			  "limit pack window by memory in addition to object limit"),
+		OPT_INTEGER(0, "depth", &depth,
+			    "maximum length of delta chain allowed in the resulting pack"),
+		OPT_BOOL(0, "reuse-delta", &reuse_delta,
+			 "reuse existing deltas"),
+		OPT_BOOL(0, "reuse-object", &reuse_object,
+			 "reuse existing objects"),
+		OPT_BOOL(0, "delta-base-offset", &allow_ofs_delta,
+			 "use OFS_DELTA objects"),
+		OPT_INTEGER(0, "threads", &delta_search_threads,
+			    "use threads when searching for best delta matches"),
+		OPT_BOOL(0, "non-empty", &non_empty,
+			 "do not create an empty pack output"),
+		OPT_BOOL(0, "revs", &use_internal_rev_list,
+			 "read revision arguments from standard input"),
+		{ OPTION_SET_INT, 0, "unpacked", &rev_list_unpacked, NULL,
+		  "limit the objects to those that are not yet packed",
+		  PARSE_OPT_NOARG | PARSE_OPT_NONEG, NULL, 1 },
+		{ OPTION_SET_INT, 0, "all", &rev_list_all, NULL,
+		  "include objects reachable from any reference",
+		  PARSE_OPT_NOARG | PARSE_OPT_NONEG, NULL, 1 },
+		{ OPTION_SET_INT, 0, "reflog", &rev_list_reflog, NULL,
+		  "include objects referred by reflog entries",
+		  PARSE_OPT_NOARG | PARSE_OPT_NONEG, NULL, 1 },
+		OPT_BOOL(0, "stdout", &pack_to_stdout,
+			 "output pack to stdout"),
+		OPT_BOOL(0, "include-tag", &include_tag,
+			 "include tag objects that refer to objects to be packed"),
+		OPT_BOOL(0, "keep-unreachable", &keep_unreachable,
+			 "keep unreachable objects"),
+		OPT_BOOL(0, "unpack-unreachable", &unpack_unreachable,
+			 "unpack unreachable objects"),
+		OPT_BOOL(0, "thin", &thin,
+			 "create thin packs"),
+		OPT_BOOL(0, "honor-pack-keep", &ignore_packed_keep,
+			 "ignore packs that have companion .keep file"),
+		OPT_INTEGER(0, "compression", &pack_compression_level,
+			    "pack compression level"),
+		OPT_SET_INT(0, "keep-true-parents", &grafts_replace_parents,
+			    "do not hide commits by grafts", 0),
+		OPT_END(),
+	};
 
 	read_replace_refs = 0;
-
-	rp_av = xcalloc(rp_ac_alloc, sizeof(*rp_av));
-
-	rp_av[0] = "pack-objects";
-	rp_av[1] = "--objects"; /* --thin will make it --objects-edge */
-	rp_ac = 2;
 
 	reset_pack_idx_option(&pack_idx_opts);
 	git_config(git_pack_config, NULL);
@@ -2350,180 +2413,46 @@ int cmd_pack_objects(int argc, const char **argv, const char *prefix)
 		pack_compression_level = core_compression_level;
 
 	progress = isatty(2);
-	for (i = 1; i < argc; i++) {
-		const char *arg = argv[i];
+	argc = parse_options(argc, argv, prefix, pack_objects_options,
+			     pack_usage, 0);
 
-		if (*arg != '-')
-			break;
+	if (argc) {
+		base_name = argv[0];
+		argc--;
+	}
+	if (pack_to_stdout != !base_name || argc)
+		usage_with_options(pack_usage, pack_objects_options);
 
-		if (!strcmp("--non-empty", arg)) {
-			non_empty = 1;
-			continue;
-		}
-		if (!strcmp("--local", arg)) {
-			local = 1;
-			continue;
-		}
-		if (!strcmp("--incremental", arg)) {
-			incremental = 1;
-			continue;
-		}
-		if (!strcmp("--honor-pack-keep", arg)) {
-			ignore_packed_keep = 1;
-			continue;
-		}
-		if (!prefixcmp(arg, "--compression=")) {
-			char *end;
-			int level = strtoul(arg+14, &end, 0);
-			if (!arg[14] || *end)
-				usage(pack_usage);
-			if (level == -1)
-				level = Z_DEFAULT_COMPRESSION;
-			else if (level < 0 || level > Z_BEST_COMPRESSION)
-				die("bad pack compression level %d", level);
-			pack_compression_level = level;
-			continue;
-		}
-		if (!prefixcmp(arg, "--max-pack-size=")) {
-			pack_size_limit_cfg = 0;
-			if (!git_parse_ulong(arg+16, &pack_size_limit))
-				usage(pack_usage);
-			continue;
-		}
-		if (!prefixcmp(arg, "--window=")) {
-			char *end;
-			window = strtoul(arg+9, &end, 0);
-			if (!arg[9] || *end)
-				usage(pack_usage);
-			continue;
-		}
-		if (!prefixcmp(arg, "--window-memory=")) {
-			if (!git_parse_ulong(arg+16, &window_memory_limit))
-				usage(pack_usage);
-			continue;
-		}
-		if (!prefixcmp(arg, "--threads=")) {
-			char *end;
-			delta_search_threads = strtoul(arg+10, &end, 0);
-			if (!arg[10] || *end || delta_search_threads < 0)
-				usage(pack_usage);
-#ifdef NO_PTHREADS
-			if (delta_search_threads != 1)
-				warning("no threads support, "
-					"ignoring %s", arg);
-#endif
-			continue;
-		}
-		if (!prefixcmp(arg, "--depth=")) {
-			char *end;
-			depth = strtoul(arg+8, &end, 0);
-			if (!arg[8] || *end)
-				usage(pack_usage);
-			continue;
-		}
-		if (!strcmp("--progress", arg)) {
-			progress = 1;
-			continue;
-		}
-		if (!strcmp("--all-progress", arg)) {
-			progress = 2;
-			continue;
-		}
-		if (!strcmp("--all-progress-implied", arg)) {
-			all_progress_implied = 1;
-			continue;
-		}
-		if (!strcmp("-q", arg)) {
-			progress = 0;
-			continue;
-		}
-		if (!strcmp("--no-reuse-delta", arg)) {
-			reuse_delta = 0;
-			continue;
-		}
-		if (!strcmp("--no-reuse-object", arg)) {
-			reuse_object = reuse_delta = 0;
-			continue;
-		}
-		if (!strcmp("--delta-base-offset", arg)) {
-			allow_ofs_delta = 1;
-			continue;
-		}
-		if (!strcmp("--stdout", arg)) {
-			pack_to_stdout = 1;
-			continue;
-		}
-		if (!strcmp("--revs", arg)) {
-			use_internal_rev_list = 1;
-			continue;
-		}
-		if (!strcmp("--keep-unreachable", arg)) {
-			keep_unreachable = 1;
-			continue;
-		}
-		if (!strcmp("--unpack-unreachable", arg)) {
-			unpack_unreachable = 1;
-			continue;
-		}
-		if (!strcmp("--include-tag", arg)) {
-			include_tag = 1;
-			continue;
-		}
-		if (!strcmp("--unpacked", arg) ||
-		    !strcmp("--reflog", arg) ||
-		    !strcmp("--all", arg)) {
-			use_internal_rev_list = 1;
-			if (rp_ac >= rp_ac_alloc - 1) {
-				rp_ac_alloc = alloc_nr(rp_ac_alloc);
-				rp_av = xrealloc(rp_av,
-						 rp_ac_alloc * sizeof(*rp_av));
-			}
-			rp_av[rp_ac++] = arg;
-			continue;
-		}
-		if (!strcmp("--thin", arg)) {
-			use_internal_rev_list = 1;
-			thin = 1;
-			rp_av[1] = "--objects-edge";
-			continue;
-		}
-		if (!prefixcmp(arg, "--index-version=")) {
-			char *c;
-			pack_idx_opts.version = strtoul(arg + 16, &c, 10);
-			if (pack_idx_opts.version > 2)
-				die("bad %s", arg);
-			if (*c == ',')
-				pack_idx_opts.off32_limit = strtoul(c+1, &c, 0);
-			if (*c || pack_idx_opts.off32_limit & 0x80000000)
-				die("bad %s", arg);
-			continue;
-		}
-		if (!strcmp(arg, "--keep-true-parents")) {
-			grafts_replace_parents = 0;
-			continue;
-		}
-		usage(pack_usage);
+	rp_av[rp_ac++] = "pack-objects";
+	if (thin) {
+		use_internal_rev_list = 1;
+		rp_av[rp_ac++] = "--objects-edge";
+	} else
+		rp_av[rp_ac++] = "--objects";
+
+	if (rev_list_all) {
+		use_internal_rev_list = 1;
+		rp_av[rp_ac++] = "--all";
+	}
+	if (rev_list_reflog) {
+		use_internal_rev_list = 1;
+		rp_av[rp_ac++] = "--reflog";
+	}
+	if (rev_list_unpacked) {
+		use_internal_rev_list = 1;
+		rp_av[rp_ac++] = "--unpacked";
 	}
 
-	/* Traditionally "pack-objects [options] base extra" failed;
-	 * we would however want to take refs parameter that would
-	 * have been given to upstream rev-list ourselves, which means
-	 * we somehow want to say what the base name is.  So the
-	 * syntax would be:
-	 *
-	 * pack-objects [options] base <refs...>
-	 *
-	 * in other words, we would treat the first non-option as the
-	 * base_name and send everything else to the internal revision
-	 * walker.
-	 */
-
-	if (!pack_to_stdout)
-		base_name = argv[i++];
-
-	if (pack_to_stdout != !base_name)
-		usage(pack_usage);
-
+	if (!reuse_object)
+		reuse_delta = 0;
+	if (pack_compression_level == -1)
+		pack_compression_level = Z_DEFAULT_COMPRESSION;
+	else if (pack_compression_level < 0 || pack_compression_level > Z_BEST_COMPRESSION)
+		die("bad pack compression level %d", pack_compression_level);
+#ifdef NO_PTHREADS
+	if (delta_search_threads != 1)
+		warning("no threads support, ignoring %s", arg);
+#endif
 	if (!pack_to_stdout && !pack_size_limit)
 		pack_size_limit = pack_size_limit_cfg;
 	if (pack_to_stdout && pack_size_limit)

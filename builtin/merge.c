@@ -27,6 +27,7 @@
 #include "resolve-undo.h"
 #include "remote.h"
 #include "fmt-merge-msg.h"
+#include "gpg-interface.h"
 
 #define DEFAULT_TWOHEAD (1<<0)
 #define DEFAULT_OCTOPUS (1<<1)
@@ -47,9 +48,10 @@ static const char * const builtin_merge_usage[] = {
 
 static int show_diffstat = 1, shortlog_len = -1, squash;
 static int option_commit = 1, allow_fast_forward = 1;
-static int fast_forward_only, option_edit;
+static int fast_forward_only, option_edit = -1;
 static int allow_trivial = 1, have_message;
-static struct strbuf merge_msg;
+static int overwrite_ignore = 1;
+static struct strbuf merge_msg = STRBUF_INIT;
 static struct commit_list *remoteheads;
 static struct strategy **use_strategies;
 static size_t use_strategies_nr, use_strategies_alloc;
@@ -63,6 +65,7 @@ static int allow_rerere_auto;
 static int abort_current_merge;
 static int show_progress = -1;
 static int default_to_upstream;
+static const char *sign_commit;
 
 static struct strategy all_strategy[] = {
 	{ "recursive",  DEFAULT_TWOHEAD | NO_TRIVIAL },
@@ -190,7 +193,7 @@ static struct option builtin_merge_options[] = {
 		"create a single commit instead of doing a merge"),
 	OPT_BOOLEAN(0, "commit", &option_commit,
 		"perform a commit if the merge succeeds (default)"),
-	OPT_BOOLEAN('e', "edit", &option_edit,
+	OPT_BOOL('e', "edit", &option_edit,
 		"edit message before committing"),
 	OPT_BOOLEAN(0, "ff", &allow_fast_forward,
 		"allow fast-forward (default)"),
@@ -208,6 +211,9 @@ static struct option builtin_merge_options[] = {
 	OPT_BOOLEAN(0, "abort", &abort_current_merge,
 		"abort the current in-progress merge"),
 	OPT_SET_INT(0, "progress", &show_progress, "force progress reporting", 1),
+	{ OPTION_STRING, 'S', "gpg-sign", &sign_commit, "key id",
+	  "GPG sign commit", PARSE_OPT_OPTARG, NULL, (intptr_t) "" },
+	OPT_BOOLEAN(0, "overwrite-ignore", &overwrite_ignore, "update ignored files (default)"),
 	OPT_END()
 };
 
@@ -569,7 +575,11 @@ static int git_merge_config(const char *k, const char *v, void *cb)
 		default_to_upstream = git_config_bool(k, v);
 		return 0;
 	}
+
 	status = fmt_merge_msg_config(k, v, cb);
+	if (status)
+		return status;
+	status = git_gpg_config(k, v, NULL);
 	if (status)
 		return status;
 	return git_diff_ui_config(k, v, cb);
@@ -766,10 +776,12 @@ int checkout_fast_forward(const unsigned char *head, const unsigned char *remote
 	memset(&trees, 0, sizeof(trees));
 	memset(&opts, 0, sizeof(opts));
 	memset(&t, 0, sizeof(t));
-	memset(&dir, 0, sizeof(dir));
-	dir.flags |= DIR_SHOW_IGNORED;
-	dir.exclude_per_dir = ".gitignore";
-	opts.dir = &dir;
+	if (overwrite_ignore) {
+		memset(&dir, 0, sizeof(dir));
+		dir.flags |= DIR_SHOW_IGNORED;
+		setup_standard_excludes(&dir);
+		opts.dir = &dir;
+	}
 
 	opts.head_idx = 1;
 	opts.src_index = &the_index;
@@ -873,20 +885,30 @@ static void abort_commit(const char *err_msg)
 	exit(1);
 }
 
+static const char merge_editor_comment[] =
+N_("Please enter a commit message to explain why this merge is necessary,\n"
+   "especially if it merges an updated upstream into a topic branch.\n"
+   "\n"
+   "Lines starting with '#' will be ignored, and an empty message aborts\n"
+   "the commit.\n");
+
 static void prepare_to_commit(void)
 {
 	struct strbuf msg = STRBUF_INIT;
+	const char *comment = _(merge_editor_comment);
 	strbuf_addbuf(&msg, &merge_msg);
 	strbuf_addch(&msg, '\n');
+	if (0 < option_edit)
+		strbuf_add_lines(&msg, "# ", comment, strlen(comment));
 	write_merge_msg(&msg);
 	run_hook(get_index_file(), "prepare-commit-msg",
 		 git_path("MERGE_MSG"), "merge", NULL, NULL);
-	if (option_edit) {
+	if (0 < option_edit) {
 		if (launch_editor(git_path("MERGE_MSG"), NULL, NULL))
 			abort_commit(NULL);
 	}
 	read_merge_msg(&msg);
-	stripspace(&msg, option_edit);
+	stripspace(&msg, 0 < option_edit);
 	if (!msg.len)
 		abort_commit(_("Empty commit message."));
 	strbuf_release(&merge_msg);
@@ -906,7 +928,9 @@ static int merge_trivial(struct commit *head)
 	parent->next->item = remoteheads->item;
 	parent->next->next = NULL;
 	prepare_to_commit();
-	commit_tree(merge_msg.buf, result_tree, parent, result_commit, NULL);
+	if (commit_tree(&merge_msg, result_tree, parent, result_commit, NULL,
+			sign_commit))
+		die(_("failed to write commit object"));
 	finish(head, result_commit, "In-index merge");
 	drop_save();
 	return 0;
@@ -937,7 +961,9 @@ static int finish_automerge(struct commit *head,
 	strbuf_addch(&merge_msg, '\n');
 	prepare_to_commit();
 	free_commit_list(remoteheads);
-	commit_tree(merge_msg.buf, result_tree, parents, result_commit, NULL);
+	if (commit_tree(&merge_msg, result_tree, parents, result_commit,
+			NULL, sign_commit))
+		die(_("failed to write commit object"));
 	strbuf_addf(&buf, "Merge made by the '%s' strategy.", wt_strategy);
 	finish(head, result_commit, buf.buf);
 	strbuf_release(&buf);
@@ -1083,6 +1109,33 @@ static void write_merge_state(void)
 	close(fd);
 }
 
+static int default_edit_option(void)
+{
+	static const char name[] = "GIT_MERGE_AUTOEDIT";
+	const char *e = getenv(name);
+	struct stat st_stdin, st_stdout;
+
+	if (have_message)
+		/* an explicit -m msg without --[no-]edit */
+		return 0;
+
+	if (e) {
+		int v = git_config_maybe_bool(name, e);
+		if (v < 0)
+			die("Bad value '%s' in environment '%s'", e, name);
+		return v;
+	}
+
+	/* Use editor if stdin and stdout are the same and is a tty */
+	return (!fstat(0, &st_stdin) &&
+		!fstat(1, &st_stdout) &&
+		isatty(0) &&
+		st_stdin.st_dev == st_stdout.st_dev &&
+		st_stdin.st_ino == st_stdout.st_ino &&
+		st_stdin.st_mode == st_stdout.st_mode);
+}
+
+
 int cmd_merge(int argc, const char **argv, const char *prefix)
 {
 	unsigned char result_tree[20];
@@ -1096,6 +1149,7 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 	struct commit_list *common = NULL;
 	const char *best_strategy = NULL, *wt_strategy = NULL;
 	struct commit_list **remotes = &remoteheads;
+	void *branch_to_free;
 
 	if (argc == 2 && !strcmp(argv[1], "-h"))
 		usage_with_options(builtin_merge_usage, builtin_merge_options);
@@ -1104,12 +1158,9 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 	 * Check if we are _not_ on a detached HEAD, i.e. if there is a
 	 * current branch.
 	 */
-	branch = resolve_ref("HEAD", head_sha1, 0, &flag);
-	if (branch) {
-		if (!prefixcmp(branch, "refs/heads/"))
-			branch += 11;
-		branch = xstrdup(branch);
-	}
+	branch = branch_to_free = resolve_refdup("HEAD", head_sha1, 0, &flag);
+	if (branch && !prefixcmp(branch, "refs/heads/"))
+		branch += 11;
 	if (!branch || is_null_sha1(head_sha1))
 		head_commit = NULL;
 	else
@@ -1175,9 +1226,12 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 		die(_("You cannot combine --no-ff with --ff-only."));
 
 	if (!abort_current_merge) {
-		if (!argc && default_to_upstream)
-			argc = setup_with_upstream(&argv);
-		else if (argc == 1 && !strcmp(argv[0], "-"))
+		if (!argc) {
+			if (default_to_upstream)
+				argc = setup_with_upstream(&argv);
+			else
+				die(_("No commit specified and merge.defaultToUpstream not set."));
+		} else if (argc == 1 && !strcmp(argv[0], "-"))
 			argv[0] = "@{-1}";
 	}
 	if (!argc)
@@ -1266,13 +1320,18 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 			    sha1_to_hex(commit->object.sha1));
 		setenv(buf.buf, argv[i], 1);
 		strbuf_reset(&buf);
-		if (merge_remote_util(commit) &&
+		if (!fast_forward_only &&
+		    merge_remote_util(commit) &&
 		    merge_remote_util(commit)->obj &&
 		    merge_remote_util(commit)->obj->type == OBJ_TAG) {
-			option_edit = 1;
+			if (option_edit < 0)
+				option_edit = 1;
 			allow_fast_forward = 0;
 		}
 	}
+
+	if (option_edit < 0)
+		option_edit = default_edit_option();
 
 	if (!use_strategies) {
 		if (!remoteheads->next)
@@ -1517,6 +1576,6 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 		ret = suggest_conflicts(option_renormalize);
 
 done:
-	free((char*)branch);
+	free(branch_to_free);
 	return ret;
 }

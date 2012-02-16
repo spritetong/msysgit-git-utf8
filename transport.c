@@ -163,7 +163,7 @@ static void set_upstreams(struct transport *transport, struct ref *refs,
 		/* Follow symbolic refs (mainly for HEAD). */
 		localname = ref->peer_ref->name;
 		remotename = ref->name;
-		tmp = resolve_ref(localname, sha, 1, &flag);
+		tmp = resolve_ref_unsafe(localname, sha, 1, &flag);
 		if (tmp && flag & REF_ISSYMREF &&
 			!prefixcmp(tmp, "refs/heads/"))
 			localname = tmp;
@@ -215,7 +215,7 @@ static struct ref *get_refs_via_rsync(struct transport *transport, int for_push)
 	rsync.argv = args;
 	rsync.stdout_to_stderr = 1;
 	args[0] = "rsync";
-	args[1] = (transport->verbose > 0) ? "-rv" : "-r";
+	args[1] = (transport->verbose > 1) ? "-rv" : "-r";
 	args[2] = buf.buf;
 	args[3] = temp_dir.buf;
 	args[4] = NULL;
@@ -268,7 +268,7 @@ static int fetch_objs_via_rsync(struct transport *transport,
 	rsync.argv = args;
 	rsync.stdout_to_stderr = 1;
 	args[0] = "rsync";
-	args[1] = (transport->verbose > 0) ? "-rv" : "-r";
+	args[1] = (transport->verbose > 1) ? "-rv" : "-r";
 	args[2] = "--ignore-existing";
 	args[3] = "--exclude";
 	args[4] = "info";
@@ -351,7 +351,7 @@ static int rsync_transport_push(struct transport *transport,
 	args[i++] = "-a";
 	if (flags & TRANSPORT_PUSH_DRY_RUN)
 		args[i++] = "--dry-run";
-	if (transport->verbose > 0)
+	if (transport->verbose > 1)
 		args[i++] = "-v";
 	args[i++] = "--ignore-existing";
 	args[i++] = "--exclude";
@@ -474,8 +474,12 @@ static int set_git_option(struct git_transport_options *opts,
 	} else if (!strcmp(name, TRANS_OPT_DEPTH)) {
 		if (!value)
 			opts->depth = 0;
-		else
-			opts->depth = atoi(value);
+		else {
+			char *end;
+			opts->depth = strtol(value, &end, 0);
+			if (*end)
+				die("transport: invalid depth option '%s'", value);
+		}
 		return 0;
 	}
 	return 1;
@@ -502,7 +506,7 @@ static struct ref *get_refs_via_connect(struct transport *transport, int for_pus
 	struct ref *refs;
 
 	connect_setup(transport, for_push, 0);
-	get_remote_heads(data->fd[0], &refs, 0, NULL,
+	get_remote_heads(data->fd[0], &refs,
 			 for_push ? REF_NORMAL : 0, &data->extra_have);
 	data->got_remote_heads = 1;
 
@@ -527,7 +531,7 @@ static int fetch_refs_via_pack(struct transport *transport,
 	args.lock_pack = 1;
 	args.use_thin_pack = data->options.thin;
 	args.include_tag = data->options.followtags;
-	args.verbose = (transport->verbose > 0);
+	args.verbose = (transport->verbose > 1);
 	args.quiet = (transport->verbose < 0);
 	args.no_progress = !transport->progress;
 	args.depth = data->options.depth;
@@ -537,7 +541,7 @@ static int fetch_refs_via_pack(struct transport *transport,
 
 	if (!data->got_remote_heads) {
 		connect_setup(transport, 0, 0);
-		get_remote_heads(data->fd[0], &refs_tmp, 0, NULL, 0, NULL);
+		get_remote_heads(data->fd[0], &refs_tmp, 0, NULL);
 		data->got_remote_heads = 1;
 	}
 
@@ -772,8 +776,7 @@ static int git_transport_push(struct transport *transport, struct ref *remote_re
 		struct ref *tmp_refs;
 		connect_setup(transport, 1, 0);
 
-		get_remote_heads(data->fd[0], &tmp_refs, 0, NULL, REF_NORMAL,
-				 NULL);
+		get_remote_heads(data->fd[0], &tmp_refs, REF_NORMAL, NULL);
 		data->got_remote_heads = 1;
 	}
 
@@ -981,7 +984,7 @@ int transport_set_option(struct transport *transport,
 void transport_set_verbosity(struct transport *transport, int verbosity,
 	int force_progress)
 {
-	if (verbosity >= 2)
+	if (verbosity >= 1)
 		transport->verbose = verbosity <= 3 ? verbosity : 3;
 	if (verbosity < 0)
 		transport->verbose = -1;

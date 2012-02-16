@@ -35,6 +35,7 @@ int git_inflate(git_zstream *, int flush);
 void git_deflate_init(git_zstream *, int level);
 void git_deflate_init_gzip(git_zstream *, int level);
 void git_deflate_end(git_zstream *);
+int git_deflate_abort(git_zstream *);
 int git_deflate_end_gently(git_zstream *);
 int git_deflate(git_zstream *, int flush);
 unsigned long git_deflate_bound(git_zstream *, unsigned long);
@@ -431,6 +432,7 @@ extern char *git_work_tree_cfg;
 extern int is_inside_work_tree(void);
 extern int have_git_dir(void);
 extern const char *get_git_dir(void);
+extern int is_git_directory(const char *path);
 extern char *get_object_directory(void);
 extern char *get_index_file(void);
 extern char *get_graft_file(void);
@@ -597,6 +599,7 @@ extern size_t packed_git_window_size;
 extern size_t packed_git_limit;
 extern size_t delta_base_cache_limit;
 extern unsigned long big_file_threshold;
+extern unsigned long pack_size_limit_cfg;
 extern int read_replace_refs;
 extern int fsync_object_files;
 extern int core_preload_index;
@@ -668,25 +671,7 @@ extern char *git_pathdup(const char *fmt, ...)
 
 /* Return a statically allocated filename matching the sha1 signature */
 extern char *mkpath(const char *fmt, ...) __attribute__((format (printf, 1, 2)));
-
-/*
- * Return the path of a file within get_git_dir().  The arguments
- * should be printf-like arguments that produce the filename relative
- * to get_git_dir().  Return the resulting path, or "/bad-path/" if
- * there is an error.  The return value is a pointer into a temporary
- * buffer that will be overwritten without notice.
- */
 extern char *git_path(const char *fmt, ...) __attribute__((format (printf, 1, 2)));
-
-/*
- * Return the path of a file within the git_dir of the submodule
- * located at path.  The other arguments should be printf-like
- * arguments that produce the filename relative to "<path>/.git".  If
- * "<path>/.git" is a gitlink file, follow it to find the actual
- * submodule git_dir.  Return the resulting path, or "/bad-path/" if
- * there is an error.  The return value is a pointer into a temporary
- * buffer that will be overwritten without notice.
- */
 extern char *git_path_submodule(const char *path, const char *fmt, ...)
 	__attribute__((format (printf, 2, 3)));
 
@@ -855,9 +840,9 @@ static inline int get_sha1_with_context(const char *str, unsigned char *sha1, st
 extern int get_sha1_hex(const char *hex, unsigned char *sha1);
 
 extern char *sha1_to_hex(const unsigned char *sha1);	/* static buffer result! */
-extern int read_ref_full(const char *filename, unsigned char *sha1,
+extern int read_ref_full(const char *refname, unsigned char *sha1,
 			 int reading, int *flags);
-extern int read_ref(const char *filename, unsigned char *sha1);
+extern int read_ref(const char *refname, unsigned char *sha1);
 
 /*
  * Resolve a reference, recursively following symbolic refererences.
@@ -889,7 +874,8 @@ extern int read_ref(const char *filename, unsigned char *sha1);
  *
  * errno is sometimes set on errors, but not always.
  */
-extern const char *resolve_ref(const char *ref, unsigned char *sha1, int reading, int *flag);
+extern const char *resolve_ref_unsafe(const char *ref, unsigned char *sha1, int reading, int *flag);
+extern char *resolve_refdup(const char *ref, unsigned char *sha1, int reading, int *flag);
 
 extern int dwim_ref(const char *str, int len, unsigned char *sha1, char **ref);
 extern int dwim_log(const char *str, int len, unsigned char *sha1, char **ref);
@@ -1049,17 +1035,16 @@ struct ref {
 extern struct ref *find_ref_by_name(const struct ref *list, const char *name);
 
 #define CONNECT_VERBOSE       (1u << 0)
-extern char *git_getpass(const char *prompt);
 extern struct child_process *git_connect(int fd[2], const char *url, const char *prog, int flags);
 extern int finish_connect(struct child_process *conn);
 extern int git_connection_is_socket(struct child_process *conn);
-extern int path_match(const char *path, int nr, char **match);
 struct extra_have_objects {
 	int nr, alloc;
 	unsigned char (*array)[20];
 };
-extern struct ref **get_remote_heads(int in, struct ref **list, int nr_match, char **match, unsigned int flags, struct extra_have_objects *);
+extern struct ref **get_remote_heads(int in, struct ref **list, unsigned int flags, struct extra_have_objects *);
 extern int server_supports(const char *feature);
+extern const char *parse_feature_request(const char *features, const char *feature);
 
 extern struct packed_git *parse_pack_index(unsigned char *sha1, const char *idx_path);
 
@@ -1160,6 +1145,14 @@ extern const char *get_log_output_encoding(void);
 extern const char *get_commit_output_encoding(void);
 
 extern int git_config_parse_parameter(const char *, config_fn_t fn, void *data);
+
+struct config_include_data {
+	int depth;
+	config_fn_t fn;
+	void *data;
+};
+#define CONFIG_INCLUDE_INIT { 0 }
+extern int git_config_include(const char *name, const char *value, void *data);
 
 extern const char *config_exclusive_filename;
 

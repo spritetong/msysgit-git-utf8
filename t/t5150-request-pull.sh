@@ -67,9 +67,11 @@ test_expect_success 'setup: two scripts for reading pull requests' '
 
 	cat <<-\EOT >read-request.sed &&
 	#!/bin/sed -nf
+	# Note that a request could ask for "tag $tagname"
 	/ in the git repository at:$/!d
 	n
 	/^$/ n
+	s/ tag \([^ ]*\)$/ tag--\1/
 	s/^[ 	]*\(.*\) \([^ ]*\)/please pull\
 	\1\
 	\2/p
@@ -93,7 +95,7 @@ test_expect_success 'setup: two scripts for reading pull requests' '
 	b
 	: diffstat
 	n
-	/ [0-9]* files changed/ {
+	/ [0-9]* files* changed/ {
 		a\\
 	DIFFSTAT
 		b
@@ -177,10 +179,7 @@ test_expect_success 'request names an appropriate branch' '
 		read repository &&
 		read branch
 	} <digest &&
-	{
-		test "$branch" = master ||
-		test "$branch" = for-upstream
-	}
+	test "$branch" = tags/full
 
 '
 

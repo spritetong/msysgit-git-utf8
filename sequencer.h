@@ -2,27 +2,48 @@
 #define SEQUENCER_H
 
 #define SEQ_DIR		"sequencer"
-#define SEQ_OLD_DIR	"sequencer-old"
 #define SEQ_HEAD_FILE	"sequencer/head"
 #define SEQ_TODO_FILE	"sequencer/todo"
 #define SEQ_OPTS_FILE	"sequencer/opts"
 
-enum replay_action { REPLAY_REVERT, REPLAY_PICK };
-
-struct replay_insn_list {
-	enum replay_action action;
-	struct commit *operand;
-	struct replay_insn_list *next;
+enum replay_action {
+	REPLAY_REVERT,
+	REPLAY_PICK
 };
 
-/*
- * Removes SEQ_OLD_DIR and renames SEQ_DIR to SEQ_OLD_DIR, ignoring
- * any errors.  Intended to be used by 'git reset'.
- *
- * With the aggressive flag, it additionally removes SEQ_OLD_DIR,
- * ignoring any errors.  Inteded to be used by the sequencer's
- * '--quit' subcommand.
- */
-void remove_sequencer_state(int aggressive);
+enum replay_subcommand {
+	REPLAY_NONE,
+	REPLAY_REMOVE_STATE,
+	REPLAY_CONTINUE,
+	REPLAY_ROLLBACK
+};
+
+struct replay_opts {
+	enum replay_action action;
+	enum replay_subcommand subcommand;
+
+	/* Boolean options */
+	int edit;
+	int record_origin;
+	int no_commit;
+	int signoff;
+	int allow_ff;
+	int allow_rerere_auto;
+
+	int mainline;
+
+	/* Merge strategy */
+	const char *strategy;
+	const char **xopts;
+	size_t xopts_nr, xopts_alloc;
+
+	/* Only used by REPLAY_NONE */
+	struct rev_info *revs;
+};
+
+/* Removes SEQ_DIR. */
+extern void remove_sequencer_state(void);
+
+int sequencer_pick_revisions(struct replay_opts *opts);
 
 #endif

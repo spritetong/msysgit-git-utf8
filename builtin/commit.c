@@ -26,6 +26,7 @@
 #include "unpack-trees.h"
 #include "quote.h"
 #include "submodule.h"
+#include "gpg-interface.h"
 
 static const char * const builtin_commit_usage[] = {
 	"git commit [options] [--] <filepattern>...",
@@ -81,10 +82,13 @@ static const char *template_file;
 static const char *author_message, *author_message_buffer;
 static char *edit_message, *use_message;
 static char *fixup_message, *squash_message;
-static int all, edit_flag, also, interactive, patch_interactive, only, amend, signoff;
+static int all, also, interactive, patch_interactive, only, amend, signoff;
+static int edit_flag = -1; /* unspecified */
 static int quiet, verbose, no_verify, allow_empty, dry_run, renew_authorship;
 static int no_post_rewrite, allow_empty_message;
 static char *untracked_files_arg, *force_date, *ignore_submodule_arg;
+static char *sign_commit;
+
 /*
  * The default commit message cleanup mode will remove the lines
  * beginning with # (shell comments) and leading and trailing
@@ -103,7 +107,7 @@ static enum commit_whence whence;
 static int use_editor = 1, include_status = 1;
 static int show_ignored_in_status;
 static const char *only_include_assumed;
-static struct strbuf message;
+static struct strbuf message = STRBUF_INIT;
 
 static int null_termination;
 static enum {
@@ -138,12 +142,14 @@ static struct option builtin_commit_options[] = {
 	OPT_STRING('C', "reuse-message", &use_message, "commit", "reuse message from specified commit"),
 	OPT_STRING(0, "fixup", &fixup_message, "commit", "use autosquash formatted message to fixup specified commit"),
 	OPT_STRING(0, "squash", &squash_message, "commit", "use autosquash formatted message to squash specified commit"),
-	OPT_BOOLEAN(0, "reset-author", &renew_authorship, "the commit is authored by me now (used with -C-c/--amend)"),
+	OPT_BOOLEAN(0, "reset-author", &renew_authorship, "the commit is authored by me now (used with -C/-c/--amend)"),
 	OPT_BOOLEAN('s', "signoff", &signoff, "add Signed-off-by:"),
 	OPT_FILENAME('t', "template", &template_file, "use specified template file"),
-	OPT_BOOLEAN('e', "edit", &edit_flag, "force edit of commit"),
+	OPT_BOOL('e', "edit", &edit_flag, "force edit of commit"),
 	OPT_STRING(0, "cleanup", &cleanup_arg, "default", "how to strip spaces and #comments from message"),
 	OPT_BOOLEAN(0, "status", &include_status, "include status in commit message template"),
+	{ OPTION_STRING, 'S', "gpg-sign", &sign_commit, "key id",
+	  "GPG sign commit", PARSE_OPT_OPTARG, NULL, (intptr_t) "" },
 	/* end commit message options */
 
 	OPT_GROUP("Commit contents options"),
@@ -190,16 +196,16 @@ static void determine_whence(struct wt_status *s)
 
 static const char *whence_s(void)
 {
-	char *s = "";
+	const char *s = "";
 
 	switch (whence) {
 	case FROM_COMMIT:
 		break;
 	case FROM_MERGE:
-		s = "merge";
+		s = _("merge");
 		break;
 	case FROM_CHERRY_PICK:
-		s = "cherry-pick";
+		s = _("cherry-pick");
 		break;
 	}
 
@@ -394,6 +400,7 @@ static char *prepare_index(int argc, const char **argv, const char *prefix,
 		fd = hold_locked_index(&index_lock, 1);
 		add_files_to_cache(also ? prefix : NULL, pathspec, 0);
 		refresh_cache_or_die(refresh_flags);
+		update_main_cache_tree(WRITE_TREE_SILENT);
 		if (write_cache(fd, active_cache, active_nr) ||
 		    close_lock_file(&index_lock))
 			die(_("unable to write new_index file"));
@@ -414,6 +421,7 @@ static char *prepare_index(int argc, const char **argv, const char *prefix,
 		fd = hold_locked_index(&index_lock, 1);
 		refresh_cache_or_die(refresh_flags);
 		if (active_cache_changed) {
+			update_main_cache_tree(WRITE_TREE_SILENT);
 			if (write_cache(fd, active_cache, active_nr) ||
 			    commit_locked_index(&index_lock))
 				die(_("unable to write new_index file"));
@@ -535,6 +543,7 @@ static void determine_author_info(struct strbuf *author_ident)
 
 	if (author_message) {
 		const char *a, *lb, *rb, *eol;
+		size_t len;
 
 		a = strstr(author_message_buffer, "\nauthor ");
 		if (!a)
@@ -555,6 +564,11 @@ static void determine_author_info(struct strbuf *author_ident)
 					 (a + strlen("\nauthor "))));
 		email = xmemdupz(lb + strlen("<"), rb - (lb + strlen("<")));
 		date = xmemdupz(rb + strlen("> "), eol - (rb + strlen("> ")));
+		len = eol - (rb + strlen("> "));
+		date = xmalloc(len + 2);
+		*date = '@';
+		memcpy(date + 1, rb + strlen("> "), len);
+		date[len + 1] = '\0';
 	}
 
 	if (force_author) {
@@ -862,10 +876,7 @@ static int prepare_to_commit(const char *index_file, const char *prefix,
 	 */
 	discard_cache();
 	read_cache_from(index_file);
-	if (!active_cache_tree)
-		active_cache_tree = cache_tree();
-	if (cache_tree_update(active_cache_tree,
-			      active_cache, active_nr, 0, 0) < 0) {
+	if (update_main_cache_tree(0)) {
 		error(_("Error building trees"));
 		return 0;
 	}
@@ -1020,8 +1031,8 @@ static int parse_and_validate_options(int argc, const char *argv[],
 
 	if (logfile || message.len || use_message || fixup_message)
 		use_editor = 0;
-	if (edit_flag)
-		use_editor = 1;
+	if (0 <= edit_flag)
+		use_editor = edit_flag;
 	if (!use_editor)
 		setenv("GIT_EDITOR", ":", 1);
 
@@ -1304,7 +1315,7 @@ static void print_summary(const char *prefix, const unsigned char *sha1,
 	rev.diffopt.break_opt = 0;
 	diff_setup_done(&rev.diffopt);
 
-	head = resolve_ref("HEAD", junk_sha1, 0, NULL);
+	head = resolve_ref_unsafe("HEAD", junk_sha1, 0, NULL);
 	printf("[%s%s ",
 		!prefixcmp(head, "refs/heads/") ?
 			head + 11 :
@@ -1325,6 +1336,7 @@ static void print_summary(const char *prefix, const unsigned char *sha1,
 static int git_commit_config(const char *k, const char *v, void *cb)
 {
 	struct wt_status *s = cb;
+	int status;
 
 	if (!strcmp(k, "commit.template"))
 		return git_config_pathname(&template_file, k, v);
@@ -1333,6 +1345,9 @@ static int git_commit_config(const char *k, const char *v, void *cb)
 		return 0;
 	}
 
+	status = git_gpg_config(k, v, NULL);
+	if (status)
+		return status;
 	return git_status_config(k, v, s);
 }
 
@@ -1485,11 +1500,16 @@ int cmd_commit(int argc, const char **argv, const char *prefix)
 		exit(1);
 	}
 
-	if (amend)
-		extra = read_commit_extra_headers(current_head);
+	if (amend) {
+		const char *exclude_gpgsig[2] = { "gpgsig", NULL };
+		extra = read_commit_extra_headers(current_head, exclude_gpgsig);
+	} else {
+		struct commit_extra_header **tail = &extra;
+		append_merge_tag_headers(parents, &tail);
+	}
 
-	if (commit_tree_extended(sb.buf, active_cache_tree->sha1, parents, sha1,
-				 author_ident.buf, extra)) {
+	if (commit_tree_extended(&sb, active_cache_tree->sha1, parents, sha1,
+				 author_ident.buf, sign_commit, extra)) {
 		rollback_index_files();
 		die(_("failed to write commit object"));
 	}

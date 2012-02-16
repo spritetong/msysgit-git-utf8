@@ -6,6 +6,7 @@
 #include "diff.h"
 #include "revision.h"
 #include "notes.h"
+#include "gpg-interface.h"
 
 int save_commit_buffer = 1;
 
@@ -421,7 +422,8 @@ struct commit *pop_most_recent_commit(struct commit_list **list,
 	return ret;
 }
 
-void clear_commit_marks(struct commit *commit, unsigned int mark)
+static void clear_commit_marks_1(struct commit_list **plist,
+				 struct commit *commit, unsigned int mark)
 {
 	while (commit) {
 		struct commit_list *parents;
@@ -436,10 +438,18 @@ void clear_commit_marks(struct commit *commit, unsigned int mark)
 			return;
 
 		while ((parents = parents->next))
-			clear_commit_marks(parents->item, mark);
+			commit_list_insert(parents->item, plist);
 
 		commit = commit->parents->item;
 	}
+}
+
+void clear_commit_marks(struct commit *commit, unsigned int mark)
+{
+	struct commit_list *list = NULL;
+	commit_list_insert(commit, &list);
+	while (list)
+		clear_commit_marks_1(&list, pop_commit(&list), mark);
 }
 
 void clear_commit_marks_for_object_array(struct object_array *a, unsigned mark)
@@ -840,6 +850,86 @@ struct commit_list *reduce_heads(struct commit_list *heads)
 	return result;
 }
 
+static const char gpg_sig_header[] = "gpgsig";
+static const int gpg_sig_header_len = sizeof(gpg_sig_header) - 1;
+
+static int do_sign_commit(struct strbuf *buf, const char *keyid)
+{
+	struct strbuf sig = STRBUF_INIT;
+	int inspos, copypos;
+
+	/* find the end of the header */
+	inspos = strstr(buf->buf, "\n\n") - buf->buf + 1;
+
+	if (!keyid || !*keyid)
+		keyid = get_signing_key();
+	if (sign_buffer(buf, &sig, keyid)) {
+		strbuf_release(&sig);
+		return -1;
+	}
+
+	for (copypos = 0; sig.buf[copypos]; ) {
+		const char *bol = sig.buf + copypos;
+		const char *eol = strchrnul(bol, '\n');
+		int len = (eol - bol) + !!*eol;
+
+		if (!copypos) {
+			strbuf_insert(buf, inspos, gpg_sig_header, gpg_sig_header_len);
+			inspos += gpg_sig_header_len;
+		}
+		strbuf_insert(buf, inspos++, " ", 1);
+		strbuf_insert(buf, inspos, bol, len);
+		inspos += len;
+		copypos += len;
+	}
+	strbuf_release(&sig);
+	return 0;
+}
+
+int parse_signed_commit(const unsigned char *sha1,
+			struct strbuf *payload, struct strbuf *signature)
+{
+	unsigned long size;
+	enum object_type type;
+	char *buffer = read_sha1_file(sha1, &type, &size);
+	int in_signature, saw_signature = -1;
+	char *line, *tail;
+
+	if (!buffer || type != OBJ_COMMIT)
+		goto cleanup;
+
+	line = buffer;
+	tail = buffer + size;
+	in_signature = 0;
+	saw_signature = 0;
+	while (line < tail) {
+		const char *sig = NULL;
+		char *next = memchr(line, '\n', tail - line);
+
+		next = next ? next + 1 : tail;
+		if (in_signature && line[0] == ' ')
+			sig = line + 1;
+		else if (!prefixcmp(line, gpg_sig_header) &&
+			 line[gpg_sig_header_len] == ' ')
+			sig = line + gpg_sig_header_len + 1;
+		if (sig) {
+			strbuf_add(signature, sig, next - sig);
+			saw_signature = 1;
+			in_signature = 1;
+		} else {
+			if (*line == '\n')
+				/* dump the whole remainder of the buffer */
+				next = tail;
+			strbuf_add(payload, line, next - line);
+			in_signature = 0;
+		}
+		line = next;
+	}
+ cleanup:
+	free(buffer);
+	return saw_signature;
+}
+
 static void handle_signed_tag(struct commit *parent, struct commit_extra_header ***tail)
 {
 	struct merge_remote_desc *desc;
@@ -900,14 +990,15 @@ static void add_extra_header(struct strbuf *buffer,
 		strbuf_addch(buffer, '\n');
 }
 
-struct commit_extra_header *read_commit_extra_headers(struct commit *commit)
+struct commit_extra_header *read_commit_extra_headers(struct commit *commit,
+						      const char **exclude)
 {
 	struct commit_extra_header *extra = NULL;
 	unsigned long size;
 	enum object_type type;
 	char *buffer = read_sha1_file(commit->object.sha1, &type, &size);
 	if (buffer && type == OBJ_COMMIT)
-		extra = read_commit_extra_header_lines(buffer, size);
+		extra = read_commit_extra_header_lines(buffer, size, exclude);
 	free(buffer);
 	return extra;
 }
@@ -921,7 +1012,23 @@ static inline int standard_header_field(const char *field, size_t len)
 		(len == 8 && !memcmp(field, "encoding ", 9)));
 }
 
-struct commit_extra_header *read_commit_extra_header_lines(const char *buffer, size_t size)
+static int excluded_header_field(const char *field, size_t len, const char **exclude)
+{
+	if (!exclude)
+		return 0;
+
+	while (*exclude) {
+		size_t xlen = strlen(*exclude);
+		if (len == xlen &&
+		    !memcmp(field, *exclude, xlen) && field[xlen] == ' ')
+			return 1;
+		exclude++;
+	}
+	return 0;
+}
+
+struct commit_extra_header *read_commit_extra_header_lines(const char *buffer, size_t size,
+							   const char **exclude)
 {
 	struct commit_extra_header *extra = NULL, **tail = &extra, *it = NULL;
 	const char *line, *next, *eof, *eob;
@@ -947,7 +1054,8 @@ struct commit_extra_header *read_commit_extra_header_lines(const char *buffer, s
 		if (next <= eof)
 			eof = next;
 
-		if (standard_header_field(line, eof - line))
+		if (standard_header_field(line, eof - line) ||
+		    excluded_header_field(line, eof - line, exclude))
 			continue;
 
 		it = xcalloc(1, sizeof(*it));
@@ -973,15 +1081,16 @@ void free_commit_extra_headers(struct commit_extra_header *extra)
 	}
 }
 
-int commit_tree(const char *msg, unsigned char *tree,
+int commit_tree(const struct strbuf *msg, unsigned char *tree,
 		struct commit_list *parents, unsigned char *ret,
-		const char *author)
+		const char *author, const char *sign_commit)
 {
 	struct commit_extra_header *extra = NULL, **tail = &extra;
 	int result;
 
 	append_merge_tag_headers(parents, &tail);
-	result = commit_tree_extended(msg, tree, parents, ret, author, extra);
+	result = commit_tree_extended(msg, tree, parents, ret,
+				      author, sign_commit, extra);
 	free_commit_extra_headers(extra);
 	return result;
 }
@@ -991,15 +1100,19 @@ static const char commit_utf8_warn[] =
 "You may want to amend it after fixing the message, or set the config\n"
 "variable i18n.commitencoding to the encoding your project uses.\n";
 
-int commit_tree_extended(const char *msg, unsigned char *tree,
+int commit_tree_extended(const struct strbuf *msg, unsigned char *tree,
 			 struct commit_list *parents, unsigned char *ret,
-			 const char *author, struct commit_extra_header *extra)
+			 const char *author, const char *sign_commit,
+			 struct commit_extra_header *extra)
 {
 	int result;
 	int encoding_is_utf8;
 	struct strbuf buffer;
 
 	assert_sha1_type(tree, OBJ_TREE);
+
+	if (memchr(msg->buf, '\0', msg->len))
+		return error("a NUL byte in commit log message not allowed.");
 
 	/* Not having i18n.commitencoding is the same as having utf-8 */
 	encoding_is_utf8 = is_encoding_utf8(git_commit_encoding);
@@ -1037,11 +1150,14 @@ int commit_tree_extended(const char *msg, unsigned char *tree,
 	strbuf_addch(&buffer, '\n');
 
 	/* And add the comment */
-	strbuf_addstr(&buffer, msg);
+	strbuf_addbuf(&buffer, msg);
 
 	/* And check the encoding */
 	if (encoding_is_utf8 && !is_utf8(buffer.buf))
 		fprintf(stderr, commit_utf8_warn);
+
+	if (sign_commit && do_sign_commit(&buffer, sign_commit))
+		return -1;
 
 	result = write_sha1_file(buffer.buf, buffer.len, commit_type, ret);
 	strbuf_release(&buffer);

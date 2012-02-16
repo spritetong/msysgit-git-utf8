@@ -1748,6 +1748,8 @@ int main(int argc, char **argv)
 	int new_refs;
 	struct ref *ref, *local_refs;
 
+	git_setup_gettext();
+
 	git_extract_argv0_path(argv[0]);
 
 	repo = xcalloc(sizeof(*repo), 1);
@@ -1820,7 +1822,7 @@ int main(int argc, char **argv)
 
 	memset(remote_dir_exists, -1, 256);
 
-	http_init(NULL, repo->url);
+	http_init(NULL, repo->url, 1);
 
 #ifdef USE_CURL_MULTI
 	is_running_queue = 0;

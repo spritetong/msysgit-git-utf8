@@ -48,6 +48,7 @@ export LANG LC_ALL PAGER TERM TZ
 EDITOR=:
 unset VISUAL
 unset EMAIL
+unset LANGUAGE
 unset $(perl -e '
 	my @env = keys %ENV;
 	my $ok = join("|", qw(
@@ -67,7 +68,8 @@ GIT_AUTHOR_NAME='A U Thor'
 GIT_COMMITTER_EMAIL=committer@example.com
 GIT_COMMITTER_NAME='C O Mitter'
 GIT_MERGE_VERBOSITY=5
-export GIT_MERGE_VERBOSITY
+GIT_MERGE_AUTOEDIT=no
+export GIT_MERGE_VERBOSITY GIT_MERGE_AUTOEDIT
 export GIT_AUTHOR_EMAIL GIT_AUTHOR_NAME
 export GIT_COMMITTER_EMAIL GIT_COMMITTER_NAME
 export EDITOR
@@ -195,6 +197,7 @@ then
 fi
 
 exec 5>&1
+exec 6<&0
 if test "$verbose" = "t"
 then
 	exec 4>&2 3>&1
@@ -331,6 +334,19 @@ test_tick () {
 	export GIT_COMMITTER_DATE GIT_AUTHOR_DATE
 }
 
+# Stop execution and start a shell. This is useful for debugging tests and
+# only makes sense together with "-v".
+#
+# Be sure to remove all invocations of this command before submitting.
+
+test_pause () {
+	if test "$verbose" = t; then
+		"$SHELL_PATH" <&6 >&3 2>&4
+	else
+		error >&5 "test_pause requires --verbose"
+	fi
+}
+
 # Call test_commit with the arguments "<message> [<file> [<contents>]]"
 #
 # This will commit a file with the given contents and the given commit
@@ -381,6 +397,20 @@ test_unconfig () {
 test_config () {
 	test_when_finished "test_unconfig '$1'" &&
 	git config "$@"
+}
+
+
+test_config_global () {
+	test_when_finished "test_unconfig --global '$1'" &&
+	git config --global "$@"
+}
+
+write_script () {
+	{
+		echo "#!${2-"$SHELL_PATH"}" &&
+		cat
+	} >"$1" &&
+	chmod +x "$1"
 }
 
 # Use test_set_prereq to tell that a particular prerequisite is available.
@@ -473,7 +503,7 @@ test_debug () {
 test_eval_ () {
 	# This is a separate function because some tests use
 	# "return" to end a test_expect_success block early.
-	eval >&3 2>&4 "$*"
+	eval </dev/null >&3 2>&4 "$*"
 }
 
 test_run_ () {
@@ -1117,12 +1147,14 @@ esac
 test -z "$NO_PERL" && test_set_prereq PERL
 test -z "$NO_PYTHON" && test_set_prereq PYTHON
 test -n "$USE_LIBPCRE" && test_set_prereq LIBPCRE
+test -z "$NO_GETTEXT" && test_set_prereq GETTEXT
 
 # Can we rely on git's output in the C locale?
 if test -n "$GETTEXT_POISON"
 then
 	GIT_GETTEXT_POISON=YesPlease
 	export GIT_GETTEXT_POISON
+	test_set_prereq GETTEXT_POISON
 else
 	test_set_prereq C_LOCALE_OUTPUT
 fi

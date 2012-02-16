@@ -15,11 +15,13 @@
 #include "diff.h"
 #include "revision.h"
 #include "gpg-interface.h"
+#include "sha1-array.h"
 
 static const char * const git_tag_usage[] = {
 	"git tag [-a|-s|-u <key-id>] [-f] [-m <msg>|-F <file>] <tagname> [<head>]",
 	"git tag -d <tagname>...",
-	"git tag -l [-n[<num>]] [<pattern>...]",
+	"git tag -l [-n[<num>]] [--contains <commit>] [--points-at <object>] "
+		"\n\t\t[<pattern>...]",
 	"git tag -v <tagname>...",
 	NULL
 };
@@ -30,6 +32,8 @@ struct tag_filter {
 	struct commit_list *with_commit;
 };
 
+static struct sha1_array points_at;
+
 static int match_pattern(const char **patterns, const char *ref)
 {
 	/* no pattern means match everything */
@@ -39,6 +43,24 @@ static int match_pattern(const char **patterns, const char *ref)
 		if (!fnmatch(*patterns, ref, 0))
 			return 1;
 	return 0;
+}
+
+static const unsigned char *match_points_at(const char *refname,
+					    const unsigned char *sha1)
+{
+	const unsigned char *tagged_sha1 = NULL;
+	struct object *obj;
+
+	if (sha1_array_lookup(&points_at, sha1) >= 0)
+		return sha1;
+	obj = parse_object(sha1);
+	if (!obj)
+		die(_("malformed object at '%s'"), refname);
+	if (obj->type == OBJ_TAG)
+		tagged_sha1 = ((struct tag *)obj)->tagged->sha1;
+	if (tagged_sha1 && sha1_array_lookup(&points_at, tagged_sha1) >= 0)
+		return tagged_sha1;
+	return NULL;
 }
 
 static int in_commit_list(const struct commit_list *want, struct commit *c)
@@ -83,18 +105,51 @@ static int contains(struct commit *candidate, const struct commit_list *want)
 	return contains_recurse(candidate, want);
 }
 
+static void show_tag_lines(const unsigned char *sha1, int lines)
+{
+	int i;
+	unsigned long size;
+	enum object_type type;
+	char *buf, *sp, *eol;
+	size_t len;
+
+	buf = read_sha1_file(sha1, &type, &size);
+	if (!buf)
+		die_errno("unable to read object %s", sha1_to_hex(sha1));
+	if (type != OBJ_COMMIT && type != OBJ_TAG)
+		goto free_return;
+	if (!size)
+		die("an empty %s object %s?",
+		    typename(type), sha1_to_hex(sha1));
+
+	/* skip header */
+	sp = strstr(buf, "\n\n");
+	if (!sp)
+		goto free_return;
+
+	/* only take up to "lines" lines, and strip the signature from a tag */
+	if (type == OBJ_TAG)
+		size = parse_signature(buf, size);
+	for (i = 0, sp += 2; i < lines && sp < buf + size; i++) {
+		if (i)
+			printf("\n    ");
+		eol = memchr(sp, '\n', size - (sp - buf));
+		len = eol ? eol - sp : size - (sp - buf);
+		fwrite(sp, len, 1, stdout);
+		if (!eol)
+			break;
+		sp = eol + 1;
+	}
+free_return:
+	free(buf);
+}
+
 static int show_reference(const char *refname, const unsigned char *sha1,
 			  int flag, void *cb_data)
 {
 	struct tag_filter *filter = cb_data;
 
 	if (match_pattern(filter->patterns, refname)) {
-		int i;
-		unsigned long size;
-		enum object_type type;
-		char *buf, *sp, *eol;
-		size_t len;
-
 		if (filter->with_commit) {
 			struct commit *commit;
 
@@ -105,38 +160,16 @@ static int show_reference(const char *refname, const unsigned char *sha1,
 				return 0;
 		}
 
+		if (points_at.nr && !match_points_at(refname, sha1))
+			return 0;
+
 		if (!filter->lines) {
 			printf("%s\n", refname);
 			return 0;
 		}
 		printf("%-15s ", refname);
-
-		buf = read_sha1_file(sha1, &type, &size);
-		if (!buf || !size)
-			return 0;
-
-		/* skip header */
-		sp = strstr(buf, "\n\n");
-		if (!sp) {
-			free(buf);
-			return 0;
-		}
-		/* only take up to "lines" lines, and strip the signature */
-		size = parse_signature(buf, size);
-		for (i = 0, sp += 2;
-				i < filter->lines && sp < buf + size;
-				i++) {
-			if (i)
-				printf("\n    ");
-			eol = memchr(sp, '\n', size - (sp - buf));
-			len = eol ? eol - sp : size - (sp - buf);
-			fwrite(sp, len, 1, stdout);
-			if (!eol)
-				break;
-			sp = eol + 1;
-		}
+		show_tag_lines(sha1, filter->lines);
 		putchar('\n');
-		free(buf);
 	}
 
 	return 0;
@@ -214,6 +247,15 @@ static const char tag_template[] =
 	N_("\n"
 	"#\n"
 	"# Write a tag message\n"
+	"# Lines starting with '#' will be ignored.\n"
+	"#\n");
+
+static const char tag_template_nocleanup[] =
+	N_("\n"
+	"#\n"
+	"# Write a tag message\n"
+	"# Lines starting with '#' will be kept; you may remove them"
+	" yourself if you want to.\n"
 	"#\n");
 
 static int git_tag_config(const char *var, const char *value, void *cb)
@@ -255,8 +297,18 @@ static int build_tag_object(struct strbuf *buf, int sign, unsigned char *result)
 	return 0;
 }
 
+struct create_tag_options {
+	unsigned int message_given:1;
+	unsigned int sign;
+	enum {
+		CLEANUP_NONE,
+		CLEANUP_SPACE,
+		CLEANUP_ALL
+	} cleanup_mode;
+};
+
 static void create_tag(const unsigned char *object, const char *tag,
-		       struct strbuf *buf, int message, int sign,
+		       struct strbuf *buf, struct create_tag_options *opt,
 		       unsigned char *prev, unsigned char *result)
 {
 	enum object_type type;
@@ -281,7 +333,7 @@ static void create_tag(const unsigned char *object, const char *tag,
 	if (header_len > sizeof(header_buf) - 1)
 		die(_("tag header too big."));
 
-	if (!message) {
+	if (!opt->message_given) {
 		int fd;
 
 		/* write the template message before editing: */
@@ -292,8 +344,12 @@ static void create_tag(const unsigned char *object, const char *tag,
 
 		if (!is_null_sha1(prev))
 			write_tag_body(fd, prev);
+		else if (opt->cleanup_mode == CLEANUP_ALL)
+			write_or_die(fd, _(tag_template),
+					strlen(_(tag_template)));
 		else
-			write_or_die(fd, _(tag_template), strlen(_(tag_template)));
+			write_or_die(fd, _(tag_template_nocleanup),
+					strlen(_(tag_template_nocleanup)));
 		close(fd);
 
 		if (launch_editor(path, buf, NULL)) {
@@ -303,14 +359,15 @@ static void create_tag(const unsigned char *object, const char *tag,
 		}
 	}
 
-	stripspace(buf, 1);
+	if (opt->cleanup_mode != CLEANUP_NONE)
+		stripspace(buf, opt->cleanup_mode == CLEANUP_ALL);
 
-	if (!message && !buf->len)
+	if (!opt->message_given && !buf->len)
 		die(_("no tag message?"));
 
 	strbuf_insert(buf, 0, header_buf, header_len);
 
-	if (build_tag_object(buf, sign, result) < 0) {
+	if (build_tag_object(buf, opt->sign, result) < 0) {
 		if (path)
 			fprintf(stderr, _("The tag message has been left in %s\n"),
 				path);
@@ -351,6 +408,23 @@ static int strbuf_check_tag_ref(struct strbuf *sb, const char *name)
 	return check_refname_format(sb->buf, 0);
 }
 
+static int parse_opt_points_at(const struct option *opt __attribute__((unused)),
+			const char *arg, int unset)
+{
+	unsigned char sha1[20];
+
+	if (unset) {
+		sha1_array_clear(&points_at);
+		return 0;
+	}
+	if (!arg)
+		return error(_("switch 'points-at' requires an object"));
+	if (get_sha1(arg, sha1))
+		return error(_("malformed object name '%s'"), arg);
+	sha1_array_append(&points_at, sha1);
+	return 0;
+}
+
 int cmd_tag(int argc, const char **argv, const char *prefix)
 {
 	struct strbuf buf = STRBUF_INIT;
@@ -358,9 +432,10 @@ int cmd_tag(int argc, const char **argv, const char *prefix)
 	unsigned char object[20], prev[20];
 	const char *object_ref, *tag;
 	struct ref_lock *lock;
-
-	int annotate = 0, sign = 0, force = 0, lines = -1,
-		list = 0, delete = 0, verify = 0;
+	struct create_tag_options opt;
+	char *cleanup_arg = NULL;
+	int annotate = 0, force = 0, lines = -1, list = 0,
+		delete = 0, verify = 0;
 	const char *msgfile = NULL, *keyid = NULL;
 	struct msg_arg msg = { 0, STRBUF_INIT };
 	struct commit_list *with_commit = NULL;
@@ -378,7 +453,9 @@ int cmd_tag(int argc, const char **argv, const char *prefix)
 		OPT_CALLBACK('m', "message", &msg, "message",
 			     "tag message", parse_msg_arg),
 		OPT_FILENAME('F', "file", &msgfile, "read message from file"),
-		OPT_BOOLEAN('s', "sign", &sign, "annotated and GPG-signed tag"),
+		OPT_BOOLEAN('s', "sign", &opt.sign, "annotated and GPG-signed tag"),
+		OPT_STRING(0, "cleanup", &cleanup_arg, "mode",
+			"how to strip spaces and #comments from message"),
 		OPT_STRING('u', "local-user", &keyid, "key-id",
 					"use another key to sign the tag"),
 		OPT__FORCE(&force, "replace the tag if exists"),
@@ -390,18 +467,24 @@ int cmd_tag(int argc, const char **argv, const char *prefix)
 			PARSE_OPT_LASTARG_DEFAULT,
 			parse_opt_with_commit, (intptr_t)"HEAD",
 		},
+		{
+			OPTION_CALLBACK, 0, "points-at", NULL, "object",
+			"print only tags of the object", 0, parse_opt_points_at
+		},
 		OPT_END()
 	};
 
 	git_config(git_tag_config, NULL);
 
+	memset(&opt, 0, sizeof(opt));
+
 	argc = parse_options(argc, argv, prefix, options, git_tag_usage, 0);
 
 	if (keyid) {
-		sign = 1;
+		opt.sign = 1;
 		set_signing_key(keyid);
 	}
-	if (sign)
+	if (opt.sign)
 		annotate = 1;
 	if (argc == 0 && !(delete || verify))
 		list = 1;
@@ -419,6 +502,8 @@ int cmd_tag(int argc, const char **argv, const char *prefix)
 		die(_("-n option is only allowed with -l."));
 	if (with_commit)
 		die(_("--contains option is only allowed with -l."));
+	if (points_at.nr)
+		die(_("--points-at option is only allowed with -l."));
 	if (delete)
 		return for_each_tag_name(argv, delete_tag);
 	if (verify)
@@ -459,9 +544,19 @@ int cmd_tag(int argc, const char **argv, const char *prefix)
 	else if (!force)
 		die(_("tag '%s' already exists"), tag);
 
+	opt.message_given = msg.given || msgfile;
+
+	if (!cleanup_arg || !strcmp(cleanup_arg, "strip"))
+		opt.cleanup_mode = CLEANUP_ALL;
+	else if (!strcmp(cleanup_arg, "verbatim"))
+		opt.cleanup_mode = CLEANUP_NONE;
+	else if (!strcmp(cleanup_arg, "whitespace"))
+		opt.cleanup_mode = CLEANUP_SPACE;
+	else
+		die(_("Invalid cleanup mode %s"), cleanup_arg);
+
 	if (annotate)
-		create_tag(object, tag, &buf, msg.given || msgfile,
-			   sign, prev, object);
+		create_tag(object, tag, &buf, &opt, prev, object);
 
 	lock = lock_any_ref_for_update(ref.buf, prev, 0);
 	if (!lock)

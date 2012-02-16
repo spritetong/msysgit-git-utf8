@@ -482,7 +482,7 @@ static void read_config(void)
 		return;
 	default_remote_name = xstrdup("origin");
 	current_branch = NULL;
-	head_ref = resolve_ref("HEAD", sha1, 0, &flag);
+	head_ref = resolve_ref_unsafe("HEAD", sha1, 0, &flag);
 	if (head_ref && (flag & REF_ISSYMREF) &&
 	    !prefixcmp(head_ref, "refs/heads/")) {
 		current_branch =
@@ -1007,7 +1007,7 @@ static char *guess_ref(const char *name, struct ref *peer)
 	struct strbuf buf = STRBUF_INIT;
 	unsigned char sha1[20];
 
-	const char *r = resolve_ref(peer->name, sha1, 1, NULL);
+	const char *r = resolve_ref_unsafe(peer->name, sha1, 1, NULL);
 	if (!r)
 		return NULL;
 
@@ -1058,7 +1058,7 @@ static int match_explicit(struct ref *src, struct ref *dst,
 		unsigned char sha1[20];
 		int flag;
 
-		dst_value = resolve_ref(matched_src->name, sha1, 1, &flag);
+		dst_value = resolve_ref_unsafe(matched_src->name, sha1, 1, &flag);
 		if (!dst_value ||
 		    ((flag & REF_ISSYMREF) &&
 		     prefixcmp(dst_value, "refs/heads/")))
@@ -1572,19 +1572,29 @@ int format_tracking_info(struct branch *branch, struct strbuf *sb)
 	base = branch->merge[0]->dst;
 	base = shorten_unambiguous_ref(base, 0);
 	if (!num_theirs)
-		strbuf_addf(sb, "Your branch is ahead of '%s' "
-			    "by %d commit%s.\n",
-			    base, num_ours, (num_ours == 1) ? "" : "s");
+		strbuf_addf(sb,
+			Q_("Your branch is ahead of '%s' by %d commit.\n",
+			   "Your branch is ahead of '%s' by %d commits.\n",
+			   num_ours),
+			base, num_ours);
 	else if (!num_ours)
-		strbuf_addf(sb, "Your branch is behind '%s' "
-			    "by %d commit%s, "
-			    "and can be fast-forwarded.\n",
-			    base, num_theirs, (num_theirs == 1) ? "" : "s");
+		strbuf_addf(sb,
+			Q_("Your branch is behind '%s' by %d commit, "
+			       "and can be fast-forwarded.\n",
+			   "Your branch is behind '%s' by %d commits, "
+			       "and can be fast-forwarded.\n",
+			   num_theirs),
+			base, num_theirs);
 	else
-		strbuf_addf(sb, "Your branch and '%s' have diverged,\n"
-			    "and have %d and %d different commit(s) each, "
-			    "respectively.\n",
-			    base, num_ours, num_theirs);
+		strbuf_addf(sb,
+			Q_("Your branch and '%s' have diverged,\n"
+			       "and have %d and %d different commit each, "
+			       "respectively.\n",
+			   "Your branch and '%s' have diverged,\n"
+			       "and have %d and %d different commits each, "
+			       "respectively.\n",
+			   num_theirs),
+			base, num_ours, num_theirs);
 	return 1;
 }
 

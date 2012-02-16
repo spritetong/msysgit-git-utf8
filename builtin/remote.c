@@ -253,7 +253,7 @@ static int add(int argc, const char **argv)
 struct branch_info {
 	char *remote_name;
 	struct string_list merge;
-	int rebase;
+	enum { NO_REBASE, NORMAL_REBASE, INTERACTIVE_REBASE } rebase;
 };
 
 static struct string_list branch_list;
@@ -310,7 +310,10 @@ static int config_read_branches(const char *key, const char *value, void *cb)
 			}
 			string_list_append(&info->merge, xstrdup(value));
 		} else
-			info->rebase = git_config_bool(orig_key, value);
+			info->rebase = value && *value == 'i' ?
+				INTERACTIVE_REBASE :
+				(git_config_bool(orig_key, value) ?
+				 NORMAL_REBASE : NO_REBASE);
 	}
 	return 0;
 }
@@ -534,7 +537,7 @@ static int add_branch_for_removal(const char *refname,
 	}
 
 	/* don't delete non-remote-tracking refs */
-	if (prefixcmp(refname, "refs/remotes")) {
+	if (prefixcmp(refname, "refs/remotes/")) {
 		/* advise user how to delete local branches */
 		if (!prefixcmp(refname, "refs/heads/"))
 			string_list_append(branches->skipped,
@@ -573,7 +576,7 @@ static int read_remote_branches(const char *refname,
 	strbuf_addf(&buf, "refs/remotes/%s/", rename->old);
 	if (!prefixcmp(refname, buf.buf)) {
 		item = string_list_append(rename->remote_branches, xstrdup(refname));
-		symref = resolve_ref(refname, orig_sha1, 1, &flag);
+		symref = resolve_ref_unsafe(refname, orig_sha1, 1, &flag);
 		if (flag & REF_ISSYMREF)
 			item->util = xstrdup(symref);
 		else
@@ -994,7 +997,9 @@ static int show_local_info_item(struct string_list_item *item, void *cb_data)
 
 	printf("    %-*s ", show_info->width, item->string);
 	if (branch_info->rebase) {
-		printf("rebases onto remote %s\n", merge->items[0].string);
+		printf("rebases %sonto remote %s\n",
+			branch_info->rebase == INTERACTIVE_REBASE ?
+			"interactively " : "", merge->items[0].string);
 		return 0;
 	} else if (show_info->any_rebase) {
 		printf(" merges with remote %s\n", merge->items[0].string);

@@ -3,11 +3,8 @@
 # Copyright (c) 2005 Amos Waterland
 #
 
-test_description='git branch --foo should not create bogus branch
+test_description='git branch assorted tests'
 
-This test runs git branch --help and checks that the argument is properly
-handled.  Specifically, that a bogus branch is not created.
-'
 . ./test-lib.sh
 
 test_expect_success \
@@ -22,7 +19,7 @@ test_expect_success \
 
 test_expect_success \
     'git branch --help should not have created a bogus branch' '
-     git branch --help </dev/null >/dev/null 2>/dev/null;
+     test_might_fail git branch --help </dev/null >/dev/null 2>/dev/null &&
      test_path_is_missing .git/refs/heads/--help
 '
 
@@ -88,7 +85,7 @@ test_expect_success \
 test_expect_success \
     'git branch -m n/n n should work' \
        'git branch -l n/n &&
-        git branch -m n/n n
+	git branch -m n/n n &&
 	test_path_is_file .git/logs/refs/heads/n'
 
 test_expect_success 'git branch -m o/o o should fail when o/p exists' '
@@ -113,6 +110,22 @@ test_expect_success 'git branch -M baz bam should succeed when baz is checked ou
 	git checkout -b baz &&
 	git branch bam &&
 	git branch -M baz bam
+'
+
+test_expect_success 'git branch -M master should work when master is checked out' '
+	git checkout master &&
+	git branch -M master
+'
+
+test_expect_success 'git branch -M master master should work when master is checked out' '
+	git checkout master &&
+	git branch -M master master
+'
+
+test_expect_success 'git branch -M master2 master2 should work when master is checked out' '
+	git checkout master &&
+	git branch master2 &&
+	git branch -M master2 master2
 '
 
 test_expect_success 'git branch -v -d t should work' '
@@ -602,6 +615,42 @@ test_expect_success 'use set-upstream on the current branch' '
 	test "z$(git config branch.master.remote)" = "zorigin" &&
 	test "z$(git config branch.master.merge)" = "zrefs/heads/frotz"
 
+'
+
+test_expect_success 'use --edit-description' '
+	write_script editor <<-\EOF &&
+		echo "New contents" >"$1"
+	EOF
+	EDITOR=./editor git branch --edit-description &&
+		write_script editor <<-\EOF &&
+		git stripspace -s <"$1" >"EDITOR_OUTPUT"
+	EOF
+	EDITOR=./editor git branch --edit-description &&
+	echo "New contents" >expect &&
+	test_cmp EDITOR_OUTPUT expect
+'
+
+test_expect_success 'detect typo in branch name when using --edit-description' '
+	write_script editor <<-\EOF &&
+		echo "New contents" >"$1"
+	EOF
+	(
+		EDITOR=./editor &&
+		export EDITOR &&
+		test_must_fail git branch --edit-description no-such-branch
+	)
+'
+
+test_expect_success 'refuse --edit-description on unborn branch for now' '
+	write_script editor <<-\EOF &&
+		echo "New contents" >"$1"
+	EOF
+	git checkout --orphan unborn &&
+	(
+		EDITOR=./editor &&
+		export EDITOR &&
+		test_must_fail git branch --edit-description
+	)
 '
 
 test_done

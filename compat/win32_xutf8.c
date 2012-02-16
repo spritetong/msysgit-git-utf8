@@ -1584,6 +1584,19 @@ static void xutf8_startup(int argc, char **argv)
 	LocalFree(wargv);
 }
 
+static int xutf8_environ_size(void)
+{
+	int count = 0;
+
+	_xutf8_env_lock(&_xutf8_environ);
+	if (_xutf8_environ)
+		count = _xutf8_environ->count;
+	_xutf8_env_unlock(_xutf8_environ);
+
+	return count + 1;
+}
+#define environ_size xutf8_environ_size()
+
 #else /* !__XUTF8_ENABLED__ */
 
 #define xutf8_startup(argc, argv)	(void)0

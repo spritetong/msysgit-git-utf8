@@ -1086,6 +1086,8 @@ static int serve(struct string_list *listen_addr, int listen_port,
 
 	drop_privileges(cred);
 
+	loginfo("Ready to rumble");
+
 	return service_loop(&socklist);
 }
 
@@ -1098,6 +1100,8 @@ int main(int argc, char **argv)
 	int detach = 0;
 	struct credentials *cred = NULL;
 	int i;
+
+	git_setup_gettext();
 
 	git_extract_argv0_path(argv[0]);
 
@@ -1268,10 +1272,8 @@ int main(int argc, char **argv)
 	if (inetd_mode || serve_mode)
 		return execute();
 
-	if (detach) {
+	if (detach)
 		daemonize();
-		loginfo("Ready to rumble");
-	}
 	else
 		sanitize_stdfds();
 

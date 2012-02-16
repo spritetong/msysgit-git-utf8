@@ -111,7 +111,7 @@ __git_ps1_show_upstream ()
 
 	# get some config options from git-config
 	local output="$(git config -z --get-regexp '^(svn-remote\..*\.url|bash\.showupstream)$' 2>/dev/null | tr '\0\n' '\n ')"
-	while read key value; do
+	while read -r key value; do
 		case "$key" in
 		bash.showupstream)
 			GIT_PS1_SHOWUPSTREAM="$value"
@@ -495,11 +495,8 @@ fi
 # 4: A suffix to be appended to each possible completion word (optional).
 __gitcomp ()
 {
-	local cur_="$cur"
+	local cur_="${3-$cur}"
 
-	if [ $# -gt 2 ]; then
-		cur_="$3"
-	fi
 	case "$cur_" in
 	--*=)
 		COMPREPLY=()
@@ -524,18 +521,15 @@ __gitcomp ()
 #    appended.
 __gitcomp_nl ()
 {
-	local s=$'\n' IFS=' '$'\t'$'\n'
-	local cur_="$cur" suffix=" "
+	local IFS=$'\n'
 
-	if [ $# -gt 2 ]; then
-		cur_="$3"
-		if [ $# -gt 3 ]; then
-			suffix="$4"
-		fi
+	# ZSH would quote the trailing space added with -S. bash users
+	# will appreciate the extra space to compensate the use of -o nospace.
+	if [ -n "${ZSH_VERSION-}" ] && [ "$suffix" = " " ]; then
+		suffix=""
 	fi
 
-	IFS=$s
-	COMPREPLY=($(compgen -P "${2-}" -S "$suffix" -W "$1" -- "$cur_"))
+	COMPREPLY=($(compgen -P "${2-}" -S "${4- }" -W "$1" -- "${3-$cur}"))
 }
 
 __git_heads ()
@@ -589,7 +583,7 @@ __git_refs ()
 			local ref entry
 			git --git-dir="$dir" for-each-ref --shell --format="ref=%(refname:short)" \
 				"refs/remotes/" | \
-			while read entry; do
+			while read -r entry; do
 				eval "$entry"
 				ref="${ref#*/}"
 				if [[ "$ref" == "$cur"* ]]; then
@@ -602,7 +596,7 @@ __git_refs ()
 	case "$cur" in
 	refs|refs/*)
 		git ls-remote "$dir" "$cur*" 2>/dev/null | \
-		while read hash i; do
+		while read -r hash i; do
 			case "$i" in
 			*^{}) ;;
 			*) echo "$i" ;;
@@ -611,7 +605,7 @@ __git_refs ()
 		;;
 	*)
 		git ls-remote "$dir" HEAD ORIG_HEAD 'refs/tags/*' 'refs/heads/*' 'refs/remotes/*' 2>/dev/null | \
-		while read hash i; do
+		while read -r hash i; do
 			case "$i" in
 			*^{}) ;;
 			refs/*) echo "${i#refs/*/}" ;;
@@ -636,20 +630,15 @@ __git_refs_remotes ()
 {
 	local i hash
 	git ls-remote "$1" 'refs/heads/*' 2>/dev/null | \
-	while read hash i; do
+	while read -r hash i; do
 		echo "$i:refs/remotes/$1/${i#refs/heads/}"
 	done
 }
 
 __git_remotes ()
 {
-	local i ngoff IFS=$'\n' d="$(__gitdir)"
-	__git_shopt -q nullglob || ngoff=1
-	__git_shopt -s nullglob
-	for i in "$d/remotes"/*; do
-		echo ${i#$d/remotes/}
-	done
-	[ "$ngoff" ] && __git_shopt -u nullglob
+	local i IFS=$'\n' d="$(__gitdir)"
+	test -d "$d/remotes" && ls -1 "$d/remotes"
 	for i in $(git --git-dir="$d" config --get-regexp 'remote\..*\.url' 2>/dev/null); do
 		i="${i#remote.}"
 		echo "${i/.url*/}"
@@ -676,7 +665,8 @@ __git_merge_strategies=
 # is needed.
 __git_compute_merge_strategies ()
 {
-	: ${__git_merge_strategies:=$(__git_list_merge_strategies)}
+	test -n "$__git_merge_strategies" ||
+	__git_merge_strategies=$(__git_list_merge_strategies)
 }
 
 __git_complete_revlist_file ()
@@ -854,7 +844,8 @@ __git_list_all_commands ()
 __git_all_commands=
 __git_compute_all_commands ()
 {
-	: ${__git_all_commands:=$(__git_list_all_commands)}
+	test -n "$__git_all_commands" ||
+	__git_all_commands=$(__git_list_all_commands)
 }
 
 __git_list_porcelain_commands ()
@@ -947,7 +938,8 @@ __git_porcelain_commands=
 __git_compute_porcelain_commands ()
 {
 	__git_compute_all_commands
-	: ${__git_porcelain_commands:=$(__git_list_porcelain_commands)}
+	test -n "$__git_porcelain_commands" ||
+	__git_porcelain_commands=$(__git_list_porcelain_commands)
 }
 
 __git_pretty_aliases ()
@@ -1152,7 +1144,7 @@ _git_branch ()
 		__gitcomp "
 			--color --no-color --verbose --abbrev= --no-abbrev
 			--track --no-track --contains --merged --no-merged
-			--set-upstream
+			--set-upstream --edit-description
 			"
 		;;
 	*)
@@ -1622,7 +1614,7 @@ _git_log ()
 
 __git_merge_options="
 	--no-commit --no-stat --log --no-log --squash --strategy
-	--commit --stat --no-squash --ff --no-ff --ff-only
+	--commit --stat --no-squash --ff --no-ff --ff-only --edit --no-edit
 "
 
 _git_merge ()
@@ -1863,7 +1855,7 @@ __git_config_get_set_variables ()
 	done
 
 	git --git-dir="$(__gitdir)" config $config_file --list 2>/dev/null |
-	while read line
+	while read -r line
 	do
 		case "$line" in
 		*.*=*)
@@ -2631,6 +2623,10 @@ _git ()
 		# workaround zsh's bug that leaves 'words' as a special
 		# variable in versions < 4.3.12
 		typeset -h words
+
+		# workaround zsh's bug that quotes spaces in the COMPREPLY
+		# array if IFS doesn't contain spaces.
+		typeset -h IFS
 	fi
 
 	local cur words cword prev
@@ -2687,6 +2683,10 @@ _gitk ()
 		# workaround zsh's bug that leaves 'words' as a special
 		# variable in versions < 4.3.12
 		typeset -h words
+
+		# workaround zsh's bug that quotes spaces in the COMPREPLY
+		# array if IFS doesn't contain spaces.
+		typeset -h IFS
 	fi
 
 	local cur words cword prev
@@ -2724,34 +2724,4 @@ complete -o bashdefault -o default -o nospace -F _gitk gitk 2>/dev/null \
 if [ Cygwin = "$(uname -o 2>/dev/null)" ]; then
 complete -o bashdefault -o default -o nospace -F _git git.exe 2>/dev/null \
 	|| complete -o default -o nospace -F _git git.exe
-fi
-
-if [[ -n ${ZSH_VERSION-} ]]; then
-	__git_shopt () {
-		local option
-		if [ $# -ne 2 ]; then
-			echo "USAGE: $0 (-q|-s|-u) <option>" >&2
-			return 1
-		fi
-		case "$2" in
-		nullglob)
-			option="$2"
-			;;
-		*)
-			echo "$0: invalid option: $2" >&2
-			return 1
-		esac
-		case "$1" in
-		-q)	setopt | grep -q "$option" ;;
-		-u)	unsetopt "$option" ;;
-		-s)	setopt "$option" ;;
-		*)
-			echo "$0: invalid flag: $1" >&2
-			return 1
-		esac
-	}
-else
-	__git_shopt () {
-		shopt "$@"
-	}
 fi

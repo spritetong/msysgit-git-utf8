@@ -301,12 +301,12 @@ void commit_notes(struct notes_tree *t, const char *msg)
 		return; /* don't have to commit an unchanged tree */
 
 	/* Prepare commit message and reflog message */
-	strbuf_addstr(&buf, "notes: "); /* commit message starts at index 7 */
 	strbuf_addstr(&buf, msg);
 	if (buf.buf[buf.len - 1] != '\n')
 		strbuf_addch(&buf, '\n'); /* Make sure msg ends with newline */
 
-	create_notes_commit(t, NULL, buf.buf + 7, commit_sha1);
+	create_notes_commit(t, NULL, &buf, commit_sha1);
+	strbuf_insert(&buf, 0, "notes: ", 7); /* commit message starts at index 7 */
 	update_ref(buf.buf, t->ref, commit_sha1, NULL, 0, DIE_ON_ERR);
 
 	strbuf_release(&buf);
@@ -804,6 +804,7 @@ static int merge_commit(struct notes_merge_options *o)
 	struct notes_tree *t;
 	struct commit *partial;
 	struct pretty_print_context pretty_ctx;
+	void *local_ref_to_free;
 	int ret;
 
 	/*
@@ -826,10 +827,10 @@ static int merge_commit(struct notes_merge_options *o)
 	t = xcalloc(1, sizeof(struct notes_tree));
 	init_notes(t, "NOTES_MERGE_PARTIAL", combine_notes_overwrite, 0);
 
-	o->local_ref = resolve_ref("NOTES_MERGE_REF", sha1, 0, NULL);
+	o->local_ref = local_ref_to_free =
+		resolve_refdup("NOTES_MERGE_REF", sha1, 0, NULL);
 	if (!o->local_ref)
 		die("Failed to resolve NOTES_MERGE_REF");
-	o->local_ref = xstrdup(o->local_ref);
 
 	if (notes_merge_commit(o, t, partial, sha1))
 		die("Failed to finalize notes merge");
@@ -846,7 +847,7 @@ static int merge_commit(struct notes_merge_options *o)
 	free_notes(t);
 	strbuf_release(&msg);
 	ret = merge_abort(o);
-	free((char*)o->local_ref);
+	free(local_ref_to_free);
 	return ret;
 }
 

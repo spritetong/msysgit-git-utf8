@@ -73,8 +73,6 @@ static int decorate_callback(const struct option *opt, const char *arg, int unse
 
 static void cmd_log_init_defaults(struct rev_info *rev)
 {
-	rev->abbrev = DEFAULT_ABBREV;
-	rev->commit_format = CMIT_FMT_DEFAULT;
 	if (fmt_pretty)
 		get_commit_format(fmt_pretty, rev);
 	rev->verbose_header = 1;
@@ -1040,7 +1038,7 @@ static char *find_branch_name(struct rev_info *rev)
 	if (positive < 0)
 		return NULL;
 	strbuf_addf(&buf, "refs/heads/%s", rev->cmdline.rev[positive].name);
-	branch = resolve_ref(buf.buf, branch_sha1, 1, NULL);
+	branch = resolve_ref_unsafe(buf.buf, branch_sha1, 1, NULL);
 	if (!branch ||
 	    prefixcmp(branch, "refs/heads/") ||
 	    hashcmp(rev->cmdline.rev[positive].item->sha1, branch_sha1))
@@ -1268,7 +1266,7 @@ int cmd_format_patch(int argc, const char **argv, const char *prefix)
 
 			rev.pending.objects[0].item->flags |= UNINTERESTING;
 			add_head_to_pending(&rev);
-			ref = resolve_ref("HEAD", sha1, 1, NULL);
+			ref = resolve_ref_unsafe("HEAD", sha1, 1, NULL);
 			if (ref && !prefixcmp(ref, "refs/heads/"))
 				branch_name = xstrdup(ref + strlen("refs/heads/"));
 			else
