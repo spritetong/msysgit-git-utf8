@@ -12,6 +12,7 @@
 #include "parse-options.h"
 #include "dir.h"
 #include "progress.h"
+#include "streaming.h"
 
 #define REACHABLE 0x0001
 #define SEEN      0x0002
@@ -29,6 +30,7 @@ static int errors_found;
 static int write_lost_and_found;
 static int verbose;
 static int show_progress = -1;
+static int show_dangling = 1;
 #define ERROR_OBJECT 01
 #define ERROR_REACHABLE 02
 #define ERROR_PACK 04
@@ -221,8 +223,9 @@ static void check_unreachable_object(struct object *obj)
 	 * start looking at, for example.
 	 */
 	if (!obj->used) {
-		printf("dangling %s %s\n", typename(obj->type),
-		       sha1_to_hex(obj->sha1));
+		if (show_dangling)
+			printf("dangling %s %s\n", typename(obj->type),
+			       sha1_to_hex(obj->sha1));
 		if (write_lost_and_found) {
 			char *filename = git_path("lost-found/%s/%s",
 				obj->type == OBJ_COMMIT ? "commit" : "other",
@@ -236,13 +239,8 @@ static void check_unreachable_object(struct object *obj)
 			if (!(f = fopen(filename, "w")))
 				die_errno("Could not open '%s'", filename);
 			if (obj->type == OBJ_BLOB) {
-				enum object_type type;
-				unsigned long size;
-				char *buf = read_sha1_file(obj->sha1,
-						&type, &size);
-				if (buf && fwrite(buf, 1, size, f) != size)
+				if (stream_blob_to_fd(fileno(f), obj->sha1, NULL, 1))
 					die_errno("Could not write '%s'", filename);
-				free(buf);
 			} else
 				fprintf(f, "%s\n", sha1_to_hex(obj->sha1));
 			if (fclose(f))
@@ -614,6 +612,7 @@ static char const * const fsck_usage[] = {
 static struct option fsck_opts[] = {
 	OPT__VERBOSE(&verbose, "be verbose"),
 	OPT_BOOLEAN(0, "unreachable", &show_unreachable, "show unreachable objects"),
+	OPT_BOOL(0, "dangling", &show_dangling, "show dangling objects"),
 	OPT_BOOLEAN(0, "tags", &show_tags, "report tags"),
 	OPT_BOOLEAN(0, "root", &show_root, "report root nodes"),
 	OPT_BOOLEAN(0, "cache", &keep_cache_objects, "make index objects head nodes"),

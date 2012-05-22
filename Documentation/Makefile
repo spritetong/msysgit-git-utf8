@@ -82,7 +82,7 @@ endif
 #
 
 ifndef ASCIIDOC7
-ASCIIDOC_EXTRA += -a asciidoc7compatible -a no-inline-literal
+ASCIIDOC_EXTRA += -a asciidoc7compatible
 endif
 ifdef DOCBOOK_XSL_172
 ASCIIDOC_EXTRA += -a git-asciidoc-no-roff
@@ -123,6 +123,16 @@ endif
 SHELL_PATH ?= $(SHELL)
 # Shell quote;
 SHELL_PATH_SQ = $(subst ','\'',$(SHELL_PATH))
+
+ifdef DEFAULT_PAGER
+DEFAULT_PAGER_SQ = $(subst ','\'',$(DEFAULT_PAGER))
+ASCIIDOC_EXTRA += -a 'git-default-pager=$(DEFAULT_PAGER_SQ)'
+endif
+
+ifdef DEFAULT_EDITOR
+DEFAULT_EDITOR_SQ = $(subst ','\'',$(DEFAULT_EDITOR))
+ASCIIDOC_EXTRA += -a 'git-default-editor=$(DEFAULT_EDITOR_SQ)'
+endif
 
 #
 # Please note that there is a minor bug in asciidoc.

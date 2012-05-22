@@ -14,6 +14,15 @@ proc hasworktree {} {
 		  [exec git rev-parse --is-inside-git-dir] == "false"}]
 }
 
+proc reponame {} {
+    global gitdir
+    set n [file normalize $gitdir]
+    if {[string match "*/.git" $n]} {
+	set n [string range $n 0 end-5]
+    }
+    return [file tail $n]
+}
+
 proc gitworktree {} {
     variable _gitworktree
     if {[info exists _gitworktree]} {
@@ -632,11 +641,15 @@ proc varcinit {view} {
 
 proc resetvarcs {view} {
     global varcid varccommits parents children vseedcount ordertok
+    global vshortids
 
     foreach vid [array names varcid $view,*] {
 	unset varcid($vid)
 	unset children($vid)
 	unset parents($vid)
+    }
+    foreach vid [array names vshortids $view,*] {
+	unset vshortids($vid)
     }
     # some commits might have children but haven't been seen yet
     foreach vid [array names children $view,*] {
@@ -924,7 +937,7 @@ proc fix_reversal {p a v} {
 proc insertrow {id p v} {
     global cmitlisted children parents varcid varctok vtokmod
     global varccommits ordertok commitidx numcommits curview
-    global targetid targetrow
+    global targetid targetrow vshortids
 
     readcommit $id
     set vid $v,$id
@@ -933,6 +946,7 @@ proc insertrow {id p v} {
     set parents($vid) [list $p]
     set a [newvarc $v $id]
     set varcid($vid) $a
+    lappend vshortids($v,[string range $id 0 3]) $id
     if {[string compare [lindex $varctok($v) $a] $vtokmod($v)] < 0} {
 	modify_arc $v $a
     }
@@ -1388,7 +1402,7 @@ proc getcommitlines {fd inst view updating}  {
     global commitidx commitdata vdatemode
     global parents children curview hlview
     global idpending ordertok
-    global varccommits varcid varctok vtokmod vfilelimit
+    global varccommits varcid varctok vtokmod vfilelimit vshortids
 
     set stuff [read $fd 500000]
     # git log doesn't terminate the last commit with a null...
@@ -1487,6 +1501,8 @@ proc getcommitlines {fd inst view updating}  {
 	}
 	set id [lindex $ids 0]
 	set vid $view,$id
+
+	lappend vshortids($view,[string range $id 0 3]) $id
 
 	if {!$listed && $updating && ![info exists varcid($vid)] &&
 	    $vfilelimit($view) ne {}} {
@@ -1710,11 +1726,26 @@ proc getcommit {id} {
 # and are present in the current view.
 # This is fairly slow...
 proc longid {prefix} {
-    global varcid curview
+    global varcid curview vshortids
 
     set ids {}
-    foreach match [array names varcid "$curview,$prefix*"] {
-	lappend ids [lindex [split $match ","] 1]
+    if {[string length $prefix] >= 4} {
+	set vshortid $curview,[string range $prefix 0 3]
+	if {[info exists vshortids($vshortid)]} {
+	    foreach id $vshortids($vshortid) {
+		if {[string match "$prefix*" $id]} {
+		    if {[lsearch -exact $ids $id] < 0} {
+			lappend ids $id
+			if {[llength $ids] >= 2} break
+		    }
+		}
+	    }
+	}
+    } else {
+	foreach match [array names varcid "$curview,$prefix*"] {
+	    lappend ids [lindex [split $match ","] 1]
+	    if {[llength $ids] >= 2} break
+	}
     }
     return $ids
 }
@@ -2511,6 +2542,8 @@ proc makewindow {} {
 	{mc "Return to mark" command gotomark}
 	{mc "Find descendant of this and mark" command find_common_desc}
 	{mc "Compare with marked commit" command compare_commits}
+	{mc "Diff this -> marked commit" command {diffvsmark 0}}
+	{mc "Diff marked commit -> this" command {diffvsmark 1}}
     }
     $rowctxmenu configure -tearoff 0
 
@@ -2519,6 +2552,8 @@ proc makewindow {} {
 	{mc "Diff this -> selected" command {diffvssel 0}}
 	{mc "Diff selected -> this" command {diffvssel 1}}
 	{mc "Make patch" command mkpatch}
+	{mc "Diff this -> marked commit" command {diffvsmark 0}}
+	{mc "Diff marked commit -> this" command {diffvsmark 1}}
     }
     $fakerowmenu configure -tearoff 0
 
@@ -4650,8 +4685,9 @@ proc askfindhighlight {row id} {
     }
     set info $commitinfo($id)
     set isbold 0
-    set fldtypes [list [mc Headline] [mc Author] [mc Date] [mc Committer] [mc CDate] [mc Comments]]
+    set fldtypes [list [mc Headline] [mc Author] "" [mc Committer] "" [mc Comments]]
     foreach f $info ty $fldtypes {
+	if {$ty eq ""} continue
 	if {($findloc eq [mc "All fields"] || $findloc eq $ty) &&
 	    [doesmatch $f]} {
 	    if {$ty eq [mc "Author"]} {
@@ -6512,7 +6548,7 @@ proc findmore {} {
     if {![info exists find_dirn]} {
 	return 0
     }
-    set fldtypes [list [mc "Headline"] [mc "Author"] [mc "Date"] [mc "Committer"] [mc "CDate"] [mc "Comments"]]
+    set fldtypes [list [mc "Headline"] [mc "Author"] "" [mc "Committer"] "" [mc "Comments"]]
     set l $findcurline
     set moretodo 0
     if {$find_dirn > 0} {
@@ -6573,6 +6609,7 @@ proc findmore {} {
 	    }
 	    set info $commitinfo($id)
 	    foreach f $info ty $fldtypes {
+		if {$ty eq ""} continue
 		if {($findloc eq [mc "All fields"] || $findloc eq $ty) &&
 		    [doesmatch $f]} {
 		    set found 1
@@ -6725,7 +6762,7 @@ proc appendwithlinks {text tags} {
 
     set start [$ctext index "end - 1c"]
     $ctext insert end $text $tags
-    set links [regexp -indices -all -inline {\m[0-9a-f]{6,40}\M} $text]
+    set links [regexp -indices -all -inline {(?:\m|-g)[0-9a-f]{6,40}\M} $text]
     foreach l $links {
 	set s [lindex $l 0]
 	set e [lindex $l 1]
@@ -6740,6 +6777,10 @@ proc appendwithlinks {text tags} {
 
 proc setlink {id lk} {
     global curview ctext pendinglinks
+
+    if {[string range $id 0 1] eq "-g"} {
+      set id [string range $id 2 end]
+    }
 
     set known 0
     if {[string length $id] < 40} {
@@ -7435,7 +7476,7 @@ proc addtocflist {ids} {
 }
 
 proc diffcmd {ids flags} {
-    global nullid nullid2
+    global log_showroot nullid nullid2
 
     set i [lsearch -exact $ids $nullid]
     set j [lsearch -exact $ids $nullid2]
@@ -7469,6 +7510,9 @@ proc diffcmd {ids flags} {
 	    lappend cmd HEAD
 	}
     } else {
+	if {$log_showroot} {
+	    lappend flags --root
+	}
 	set cmd [concat | git diff-tree -r $flags $ids]
     }
     return $cmd
@@ -8459,6 +8503,11 @@ proc rowmenu {x y id} {
     } else {
 	set state normal
     }
+    if {[info exists markedid] && $markedid ne $id} {
+	set mstate normal
+    } else {
+	set mstate disabled
+    }
     if {$id ne $nullid && $id ne $nullid2} {
 	set menu $rowctxmenu
 	if {$mainhead ne {}} {
@@ -8466,21 +8515,17 @@ proc rowmenu {x y id} {
 	} else {
 	    $menu entryconfigure 7 -label [mc "Detached head: can't reset" $mainhead] -state disabled
 	}
-	if {[info exists markedid] && $markedid ne $id} {
-	    $menu entryconfigure 9 -state normal
-	    $menu entryconfigure 10 -state normal
-	    $menu entryconfigure 11 -state normal
-	} else {
-	    $menu entryconfigure 9 -state disabled
-	    $menu entryconfigure 10 -state disabled
-	    $menu entryconfigure 11 -state disabled
-	}
+	$menu entryconfigure 9 -state $mstate
+	$menu entryconfigure 10 -state $mstate
+	$menu entryconfigure 11 -state $mstate
     } else {
 	set menu $fakerowmenu
     }
     $menu entryconfigure [mca "Diff this -> selected"] -state $state
     $menu entryconfigure [mca "Diff selected -> this"] -state $state
     $menu entryconfigure [mca "Make patch"] -state $state
+    $menu entryconfigure [mca "Diff this -> marked commit"] -state $mstate
+    $menu entryconfigure [mca "Diff marked commit -> this"] -state $mstate
     tk_popup $menu $x $y
 }
 
@@ -8679,6 +8724,21 @@ proc diffvssel {dirn} {
     } else {
 	set oldid $rowmenuid
 	set newid [commitonrow $selectedline]
+    }
+    addtohistory [list doseldiff $oldid $newid] savectextpos
+    doseldiff $oldid $newid
+}
+
+proc diffvsmark {dirn} {
+    global rowmenuid markedid
+
+    if {![info exists markedid]} return
+    if {$dirn} {
+	set oldid $markedid
+	set newid $rowmenuid
+    } else {
+	set oldid $rowmenuid
+	set newid $markedid
     }
     addtohistory [list doseldiff $oldid $newid] savectextpos
     doseldiff $oldid $newid
@@ -10969,6 +11029,7 @@ proc doprefs {} {
     lappend pages [prefspage_general $notebook] [mc "General"]
     lappend pages [prefspage_colors $notebook] [mc "Colors"]
     lappend pages [prefspage_fonts $notebook] [mc "Fonts"]
+    set col 0
     foreach {page title} $pages {
 	if {$use_notebook} {
 	    $notebook add $page -text $title
@@ -11519,10 +11580,20 @@ catch {
     }
 }
 
+set log_showroot true
+catch {
+    set log_showroot [exec git config --bool --get log.showroot]
+}
+
 if {[tk windowingsystem] eq "aqua"} {
     set mainfont {{Lucida Grande} 9}
     set textfont {Monaco 9}
     set uifont {{Lucida Grande} 9 bold}
+} elseif {![catch {::tk::pkgconfig get fontsystem} xft] && $xft eq "xft"} {
+    # fontconfig!
+    set mainfont {sans 9}
+    set textfont {monospace 9}
+    set uifont {sans 9 bold}
 } else {
     set mainfont {Helvetica 9}
     set textfont {Courier 9}
@@ -11704,6 +11775,8 @@ if {[package vcompare $git_version "1.6.6.2"] >= 0} {
     set show_notes "--show-notes"
 }
 
+set appname "gitk"
+
 set runq {}
 set history {}
 set historyindex 0
@@ -11773,7 +11846,7 @@ catch {
 }
 # wait for the window to become visible
 tkwait visibility .
-wm title . "[file tail $argv0]: [file tail [pwd]]"
+wm title . "$appname: [reponame]"
 update
 readrefs
 

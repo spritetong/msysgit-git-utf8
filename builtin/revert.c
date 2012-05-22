@@ -86,6 +86,7 @@ static void verify_opt_mutually_compatible(const char *me, ...)
 				break;
 		}
 	}
+	va_end(ap);
 
 	if (opt1 && opt2)
 		die(_("%s: %s cannot be used with %s"),	me, opt1, opt2);
@@ -114,12 +115,16 @@ static void parse_args(int argc, const char **argv, struct replay_opts *opts)
 		OPT_END(),
 		OPT_END(),
 		OPT_END(),
+		OPT_END(),
+		OPT_END(),
 	};
 
 	if (opts->action == REPLAY_PICK) {
 		struct option cp_extra[] = {
 			OPT_BOOLEAN('x', NULL, &opts->record_origin, "append commit name"),
 			OPT_BOOLEAN(0, "ff", &opts->allow_ff, "allow fast-forward"),
+			OPT_BOOLEAN(0, "allow-empty", &opts->allow_empty, "preserve initially empty commits"),
+			OPT_BOOLEAN(0, "keep-redundant-commits", &opts->keep_redundant_commits, "keep redundant, empty commits"),
 			OPT_END(),
 		};
 		if (parse_options_concat(options, ARRAY_SIZE(options), cp_extra))
@@ -136,6 +141,10 @@ static void parse_args(int argc, const char **argv, struct replay_opts *opts)
 				"--continue", contin,
 				"--abort", rollback,
 				NULL);
+
+	/* implies allow_empty */
+	if (opts->keep_redundant_commits)
+		opts->allow_empty = 1;
 
 	/* Set the subcommand */
 	if (remove_state)
@@ -181,12 +190,15 @@ static void parse_args(int argc, const char **argv, struct replay_opts *opts)
 	if (opts->subcommand != REPLAY_NONE) {
 		opts->revs = NULL;
 	} else {
+		struct setup_revision_opt s_r_opt;
 		opts->revs = xmalloc(sizeof(*opts->revs));
 		init_revisions(opts->revs, NULL);
 		opts->revs->no_walk = 1;
 		if (argc < 2)
 			usage_with_options(usage_str, options);
-		argc = setup_revisions(argc, argv, opts->revs, NULL);
+		memset(&s_r_opt, 0, sizeof(s_r_opt));
+		s_r_opt.assume_dashdash = 1;
+		argc = setup_revisions(argc, argv, opts->revs, &s_r_opt);
 	}
 
 	if (argc > 1)

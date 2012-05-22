@@ -12,8 +12,9 @@ The configuration variables are used by both the git plumbing
 and the porcelains. The variables are divided into sections, wherein
 the fully qualified variable name of the variable itself is the last
 dot-separated segment and the section name is everything before the last
-dot. The variable names are case-insensitive and only alphanumeric
-characters are allowed. Some variables may appear multiple times.
+dot. The variable names are case-insensitive, allow only alphanumeric
+characters and `-`, and must start with an alphabetic character.  Some
+variables may appear multiple times.
 
 Syntax
 ~~~~~~
@@ -54,9 +55,10 @@ All the other lines (and the remainder of the line after the section
 header) are recognized as setting variables, in the form
 'name = value'.  If there is no equal sign on the line, the entire line
 is taken as 'name' and the variable is recognized as boolean "true".
-The variable names are case-insensitive and only alphanumeric
-characters and `-` are allowed.  There can be more than one value
-for a given variable; we say then that variable is multivalued.
+The variable names are case-insensitive, allow only alphanumeric characters
+and `-`, and must start with an alphabetic character.  There can be more
+than one value for a given variable; we say then that the variable is
+multivalued.
 
 Leading and trailing whitespace in a variable value is discarded.
 Internal whitespace within a variable value is retained verbatim.
@@ -93,7 +95,9 @@ included file is expanded immediately, as if its contents had been
 found at the location of the include directive. If the value of the
 `include.path` variable is a relative path, the path is considered to be
 relative to the configuration file in which the include directive was
-found. See below for examples.
+found. The value of `include.path` is subject to tilde expansion: `~/`
+is expanded to the value of `$HOME`, and `~user/` to the specified
+user's home directory. See below for examples.
 
 Example
 ~~~~~~~
@@ -120,6 +124,7 @@ Example
 	[include]
 		path = /path/to/foo.inc ; include by absolute path
 		path = foo ; expand "foo" relative to the current file
+		path = ~/foo ; expand "foo" in your $HOME directory
 
 Variables
 ~~~~~~~~~
@@ -136,8 +141,23 @@ advice.*::
 +
 --
 	pushNonFastForward::
-		Advice shown when linkgit:git-push[1] refuses
-		non-fast-forward refs.
+		Set this variable to 'false' if you want to disable
+		'pushNonFFCurrent', 'pushNonFFDefault', and
+		'pushNonFFMatching' simultaneously.
+	pushNonFFCurrent::
+		Advice shown when linkgit:git-push[1] fails due to a
+		non-fast-forward update to the current branch.
+	pushNonFFDefault::
+		Advice to set 'push.default' to 'upstream' or 'current'
+		when you ran linkgit:git-push[1] and pushed 'matching
+		refs' by default (i.e. you did not provide an explicit
+		refspec, and no 'push.default' configuration was set)
+		and it resulted in a non-fast-forward error.
+	pushNonFFMatching::
+		Advice shown when you ran linkgit:git-push[1] and pushed
+		'matching refs' explicitly (i.e. you used ':', or
+		specified a refspec that isn't your current branch) and
+		it resulted in a non-fast-forward error.
 	statusHints::
 		Directions on how to stage/unstage/add shown in the
 		output of linkgit:git-status[1] and the template shown
@@ -467,8 +487,8 @@ Common unit suffixes of 'k', 'm', or 'g' are supported.
 core.excludesfile::
 	In addition to '.gitignore' (per-directory) and
 	'.git/info/exclude', git looks into this file for patterns
-	of files which are not meant to be tracked.  "{tilde}/" is expanded
-	to the value of `$HOME` and "{tilde}user/" to the specified user's
+	of files which are not meant to be tracked.  "`~/`" is expanded
+	to the value of `$HOME` and "`~user/`" to the specified user's
 	home directory.  See linkgit:gitignore[5].
 
 core.askpass::
@@ -843,6 +863,44 @@ color.ui::
 	`never` if you prefer git commands not to use color unless enabled
 	explicitly with some other configuration or the `--color` option.
 
+column.ui::
+	Specify whether supported commands should output in columns.
+	This variable consists of a list of tokens separated by spaces
+	or commas:
++
+--
+`always`;;
+	always show in columns
+`never`;;
+	never show in columns
+`auto`;;
+	show in columns if the output is to the terminal
+`column`;;
+	fill columns before rows (default)
+`row`;;
+	fill rows before columns
+`plain`;;
+	show in one column
+`dense`;;
+	make unequal size columns to utilize more space
+`nodense`;;
+	make equal size columns
+--
++
+	This option defaults to 'never'.
+
+column.branch::
+	Specify whether to output branch listing in `git branch` in columns.
+	See `column.ui` for details.
+
+column.status::
+	Specify whether to output untracked files in `git status` in columns.
+	See `column.ui` for details.
+
+column.tag::
+	Specify whether to output tag listing in `git tag` in columns.
+	See `column.ui` for details.
+
 commit.status::
 	A boolean to enable/disable inclusion of status information in the
 	commit message template when using an editor to prepare the commit
@@ -850,7 +908,7 @@ commit.status::
 
 commit.template::
 	Specify a file to use as the template for new commit messages.
-	"{tilde}/" is expanded to the value of `$HOME` and "{tilde}user/" to the
+	"`~/`" is expanded to the value of `$HOME` and "`~user/`" to the
 	specified user's home directory.
 
 credential.helper::
@@ -975,7 +1033,7 @@ format.thread::
 	a boolean value, or `shallow` or `deep`.  `shallow` threading
 	makes every mail a reply to the head of the series,
 	where the head is chosen from the cover letter, the
-	`\--in-reply-to`, and the first patch mail, in this order.
+	`--in-reply-to`, and the first patch mail, in this order.
 	`deep` threading makes every mail a reply to the previous one.
 	A true boolean value is the same as `shallow`, and a false
 	value disables threading.
@@ -1280,9 +1338,10 @@ help.autocorrect::
 	This is the default.
 
 http.proxy::
-	Override the HTTP proxy, normally configured using the 'http_proxy'
-	environment variable (see linkgit:curl[1]).  This can be overridden
-	on a per-remote basis; see remote.<name>.proxy
+	Override the HTTP proxy, normally configured using the 'http_proxy',
+	'https_proxy', and 'all_proxy' environment variables (see
+	`curl(1)`).  This can be overridden on a per-remote basis; see
+	remote.<name>.proxy
 
 http.cookiefile::
 	File containing previously stored cookie lines which should be used
@@ -1405,7 +1464,7 @@ instaweb.port::
 interactive.singlekey::
 	In interactive commands, allow the user to provide one-letter
 	input with a single key (i.e., without hitting enter).
-	Currently this is used by the `\--patch` mode of
+	Currently this is used by the `--patch` mode of
 	linkgit:git-add[1], linkgit:git-checkout[1], linkgit:git-commit[1],
 	linkgit:git-reset[1], and linkgit:git-stash[1]. Note that this
 	setting is silently ignored if portable keystroke input
@@ -1413,13 +1472,13 @@ interactive.singlekey::
 
 log.abbrevCommit::
 	If true, makes linkgit:git-log[1], linkgit:git-show[1], and
-	linkgit:git-whatchanged[1] assume `\--abbrev-commit`. You may
-	override this option with `\--no-abbrev-commit`.
+	linkgit:git-whatchanged[1] assume `--abbrev-commit`. You may
+	override this option with `--no-abbrev-commit`.
 
 log.date::
 	Set the default date-time mode for the 'log' command.
 	Setting a value for log.date is similar to using 'git log''s
-	`\--date` option.  Possible values are `relative`, `local`,
+	`--date` option.  Possible values are `relative`, `local`,
 	`default`, `iso`, `rfc`, and `short`; see linkgit:git-log[1]
 	for details.
 
@@ -1609,18 +1668,18 @@ pack.indexVersion::
 	and this config option ignored whenever the corresponding pack is
 	larger than 2 GB.
 +
-If you have an old git that does not understand the version 2 `{asterisk}.idx` file,
+If you have an old git that does not understand the version 2 `*.idx` file,
 cloning or fetching over a non native protocol (e.g. "http" and "rsync")
-that will copy both `{asterisk}.pack` file and corresponding `{asterisk}.idx` file from the
+that will copy both `*.pack` file and corresponding `*.idx` file from the
 other side may give you a repository that cannot be accessed with your
-older version of git. If the `{asterisk}.pack` file is smaller than 2 GB, however,
+older version of git. If the `*.pack` file is smaller than 2 GB, however,
 you can use linkgit:git-index-pack[1] on the *.pack file to regenerate
-the `{asterisk}.idx` file.
+the `*.idx` file.
 
 pack.packSizeLimit::
 	The maximum size of a pack.  This setting only affects
 	packing to a file when repacking, i.e. the git:// protocol
-	is unaffected.  It can be overridden by the `\--max-pack-size`
+	is unaffected.  It can be overridden by the `--max-pack-size`
 	option of linkgit:git-repack[1]. The minimum size allowed is
 	limited to 1 MiB. The default is unlimited.
 	Common unit suffixes of 'k', 'm', or 'g' are
@@ -1630,8 +1689,8 @@ pager.<cmd>::
 	If the value is boolean, turns on or off pagination of the
 	output of a particular git subcommand when writing to a tty.
 	Otherwise, turns on pagination for the subcommand using the
-	pager specified by the value of `pager.<cmd>`.  If `\--paginate`
-	or `\--no-pager` is specified on the command line, it takes
+	pager specified by the value of `pager.<cmd>`.  If `--paginate`
+	or `--no-pager` is specified on the command line, it takes
 	precedence over this option.  To disable pagination for all
 	commands, set `core.pager` or `GIT_PAGER` to `cat`.
 
@@ -1639,9 +1698,9 @@ pretty.<name>::
 	Alias for a --pretty= format string, as specified in
 	linkgit:git-log[1]. Any aliases defined here can be used just
 	as the built-in pretty formats could. For example,
-	running `git config pretty.changelog "format:{asterisk} %H %s"`
+	running `git config pretty.changelog "format:* %H %s"`
 	would cause the invocation `git log --pretty=changelog`
-	to be equivalent to running `git log "--pretty=format:{asterisk} %H %s"`.
+	to be equivalent to running `git log "--pretty=format:* %H %s"`.
 	Note that an alias with the same name as a built-in format
 	will be silently ignored.
 
@@ -1669,12 +1728,30 @@ push.default::
 	line. Possible values are:
 +
 * `nothing` - do not push anything.
-* `matching` - push all matching branches.
-  All branches having the same name in both ends are considered to be
-  matching. This is the default.
+* `matching` - push all branches having the same name in both ends.
+  This is for those who prepare all the branches into a publishable
+  shape and then push them out with a single command.  It is not
+  appropriate for pushing into a repository shared by multiple users,
+  since locally stalled branches will attempt a non-fast forward push
+  if other users updated the branch.
+  +
+  This is currently the default, but Git 2.0 will change the default
+  to `simple`.
 * `upstream` - push the current branch to its upstream branch.
-* `tracking` - deprecated synonym for `upstream`.
+  With this, `git push` will update the same remote ref as the one which
+  is merged by `git pull`, making `push` and `pull` symmetrical.
+  See "branch.<name>.merge" for how to configure the upstream branch.
+* `simple` - like `upstream`, but refuses to push if the upstream
+  branch's name is different from the local one. This is the safest
+  option and is well-suited for beginners. It will become the default
+  in Git 2.0.
 * `current` - push the current branch to a branch of the same name.
+  +
+  The `simple`, `current` and `upstream` modes are for those who want to
+  push out a single branch after finishing work, even when the other
+  branches are not yet ready to be pushed out. If you are working with
+  other people to push into the same shared repository, you would want
+  to use one of these.
 
 rebase.stat::
 	Whether to show a diffstat of what changed upstream since the last
@@ -1759,7 +1836,7 @@ remote.<name>.push::
 
 remote.<name>.mirror::
 	If true, pushing to this remote will automatically behave
-	as if the `\--mirror` option was given on the command line.
+	as if the `--mirror` option was given on the command line.
 
 remote.<name>.skipDefaultUpdate::
 	If true, this remote will be skipped by default when updating

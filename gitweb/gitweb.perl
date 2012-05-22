@@ -133,6 +133,12 @@ our $default_projects_order = "project";
 # (only effective if this variable evaluates to true)
 our $export_ok = "++GITWEB_EXPORT_OK++";
 
+# don't generate age column on the projects list page
+our $omit_age_column = 0;
+
+# don't generate information about owners of repositories
+our $omit_owner=0;
+
 # show repository only if this subroutine returns true
 # when given the path to the project, for example:
 #    sub { return -e "$_[0]/git-daemon-export-ok"; }
@@ -1081,7 +1087,16 @@ sub evaluate_and_validate_params {
 		if (length($searchtext) < 2) {
 			die_error(403, "At least two characters are required for search parameter");
 		}
-		$search_regexp = $search_use_regexp ? $searchtext : quotemeta $searchtext;
+		if ($search_use_regexp) {
+			$search_regexp = $searchtext;
+			if (!eval { qr/$search_regexp/; 1; }) {
+				(my $error = $@) =~ s/ at \S+ line \d+.*\n?//;
+				die_error(400, "Invalid search regexp '$search_regexp'",
+				          esc_html($error));
+			}
+		} else {
+			$search_regexp = quotemeta $searchtext;
+		}
 	}
 }
 
@@ -1715,6 +1730,97 @@ sub chop_and_escape_str {
 	}
 }
 
+# Highlight selected fragments of string, using given CSS class,
+# and escape HTML.  It is assumed that fragments do not overlap.
+# Regions are passed as list of pairs (array references).
+#
+# Example: esc_html_hl_regions("foobar", "mark", [ 0, 3 ]) returns
+# '<span class="mark">foo</span>bar'
+sub esc_html_hl_regions {
+	my ($str, $css_class, @sel) = @_;
+	my %opts = grep { ref($_) ne 'ARRAY' } @sel;
+	@sel     = grep { ref($_) eq 'ARRAY' } @sel;
+	return esc_html($str, %opts) unless @sel;
+
+	my $out = '';
+	my $pos = 0;
+
+	for my $s (@sel) {
+		my ($begin, $end) = @$s;
+
+		# Don't create empty <span> elements.
+		next if $end <= $begin;
+
+		my $escaped = esc_html(substr($str, $begin, $end - $begin),
+		                       %opts);
+
+		$out .= esc_html(substr($str, $pos, $begin - $pos), %opts)
+			if ($begin - $pos > 0);
+		$out .= $cgi->span({-class => $css_class}, $escaped);
+
+		$pos = $end;
+	}
+	$out .= esc_html(substr($str, $pos), %opts)
+		if ($pos < length($str));
+
+	return $out;
+}
+
+# return positions of beginning and end of each match
+sub matchpos_list {
+	my ($str, $regexp) = @_;
+	return unless (defined $str && defined $regexp);
+
+	my @matches;
+	while ($str =~ /$regexp/g) {
+		push @matches, [$-[0], $+[0]];
+	}
+	return @matches;
+}
+
+# highlight match (if any), and escape HTML
+sub esc_html_match_hl {
+	my ($str, $regexp) = @_;
+	return esc_html($str) unless defined $regexp;
+
+	my @matches = matchpos_list($str, $regexp);
+	return esc_html($str) unless @matches;
+
+	return esc_html_hl_regions($str, 'match', @matches);
+}
+
+
+# highlight match (if any) of shortened string, and escape HTML
+sub esc_html_match_hl_chopped {
+	my ($str, $chopped, $regexp) = @_;
+	return esc_html_match_hl($str, $regexp) unless defined $chopped;
+
+	my @matches = matchpos_list($str, $regexp);
+	return esc_html($chopped) unless @matches;
+
+	# filter matches so that we mark chopped string
+	my $tail = "... "; # see chop_str
+	unless ($chopped =~ s/\Q$tail\E$//) {
+		$tail = '';
+	}
+	my $chop_len = length($chopped);
+	my $tail_len = length($tail);
+	my @filtered;
+
+	for my $m (@matches) {
+		if ($m->[0] > $chop_len) {
+			push @filtered, [ $chop_len, $chop_len + $tail_len ] if ($tail_len > 0);
+			last;
+		} elsif ($m->[1] > $chop_len) {
+			push @filtered, [ $m->[0], $chop_len + $tail_len ];
+			last;
+		}
+		push @filtered, $m;
+	}
+
+	return esc_html_hl_regions($chopped . $tail, 'match', @filtered);
+}
+
 ## ----------------------------------------------------------------------
 ## functions returning short strings
 
@@ -2330,26 +2436,32 @@ sub format_cc_diff_chunk_header {
 }
 
 # process patch (diff) line (not to be used for diff headers),
-# returning class and HTML-formatted (but not wrapped) line
-sub process_diff_line {
-	my $line = shift;
-	my ($from, $to) = @_;
+# returning HTML-formatted (but not wrapped) line.
+# If the line is passed as a reference, it is treated as HTML and not
+# esc_html()'ed.
+sub format_diff_line {
+	my ($line, $diff_class, $from, $to) = @_;
 
-	my $diff_class = diff_line_class($line, $from, $to);
+	if (ref($line)) {
+		$line = $$line;
+	} else {
+		chomp $line;
+		$line = untabify($line);
 
-	chomp $line;
-	$line = untabify($line);
-
-	if ($from && $to && $line =~ m/^\@{2} /) {
-		$line = format_unidiff_chunk_header($line, $from, $to);
-		return $diff_class, $line;
-
-	} elsif ($from && $to && $line =~ m/^\@{3}/) {
-		$line = format_cc_diff_chunk_header($line, $from, $to);
-		return $diff_class, $line;
-
+		if ($from && $to && $line =~ m/^\@{2} /) {
+			$line = format_unidiff_chunk_header($line, $from, $to);
+		} elsif ($from && $to && $line =~ m/^\@{3}/) {
+			$line = format_cc_diff_chunk_header($line, $from, $to);
+		} else {
+			$line = esc_html($line, -nbsp=>1);
+		}
 	}
-	return $diff_class, esc_html($line, -nbsp=>1);
+
+	my $diff_classes = "diff";
+	$diff_classes .= " $diff_class" if ($diff_class);
+	$line = "<div class=\"$diff_classes\">$line</div>\n";
+
+	return $line;
 }
 
 # Generates undef or something like "_snapshot_" or "snapshot (_tbz2_ _zip_)",
@@ -2906,9 +3018,11 @@ sub git_get_projects_list {
 			}
 			if (check_export_ok("$projectroot/$path")) {
 				my $pr = {
-					path => $path,
-					owner => to_utf8($owner),
+					path => $path
 				};
+				if ($owner) {
+					$pr->{'owner'} = to_utf8($owner);
+				}
 				push @list, $pr;
 			}
 		}
@@ -2982,11 +3096,15 @@ sub filter_forks_from_projects_list {
 sub search_projects_list {
 	my ($projlist, %opts) = @_;
 	my $tagfilter  = $opts{'tagfilter'};
-	my $searchtext = $opts{'searchtext'};
+	my $search_re = $opts{'search_regexp'};
 
 	return @$projlist
-		unless ($tagfilter || $searchtext);
+		unless ($tagfilter || $search_re);
 
+	# searching projects require filling to be run before it;
+	fill_project_list_info($projlist,
+	                       $tagfilter  ? 'ctags' : (),
+	                       $search_re ? ('path', 'descr') : ());
 	my @projects;
  PROJECT:
 	foreach my $pr (@$projlist) {
@@ -2997,10 +3115,10 @@ sub search_projects_list {
 				grep { lc($_) eq lc($tagfilter) } keys %{$pr->{'ctags'}};
 		}
 
-		if ($searchtext) {
+		if ($search_re) {
 			next unless
-				$pr->{'path'} =~ /$searchtext/ ||
-				$pr->{'descr_long'} =~ /$searchtext/;
+				$pr->{'path'} =~ /$search_re/ ||
+				$pr->{'descr_long'} =~ /$search_re/;
 		}
 
 		push @projects, $pr;
@@ -3791,6 +3909,7 @@ sub print_feed_meta {
 				'-type' => "application/$type+xml"
 			);
 
+			$href_params{'extra_options'} = undef;
 			$href_params{'action'} = $type;
 			$link_attr{'-href'} = href(%href_params);
 			print "<link ".
@@ -4921,9 +5040,185 @@ sub git_difftree_body {
 	print "</table>\n";
 }
 
-sub print_sidebyside_diff_chunk {
-	my @chunk = @_;
+# Print context lines and then rem/add lines in a side-by-side manner.
+sub print_sidebyside_diff_lines {
+	my ($ctx, $rem, $add) = @_;
+
+	# print context block before add/rem block
+	if (@$ctx) {
+		print join '',
+			'<div class="chunk_block ctx">',
+				'<div class="old">',
+				@$ctx,
+				'</div>',
+				'<div class="new">',
+				@$ctx,
+				'</div>',
+			'</div>';
+	}
+
+	if (!@$add) {
+		# pure removal
+		print join '',
+			'<div class="chunk_block rem">',
+				'<div class="old">',
+				@$rem,
+				'</div>',
+			'</div>';
+	} elsif (!@$rem) {
+		# pure addition
+		print join '',
+			'<div class="chunk_block add">',
+				'<div class="new">',
+				@$add,
+				'</div>',
+			'</div>';
+	} else {
+		print join '',
+			'<div class="chunk_block chg">',
+				'<div class="old">',
+				@$rem,
+				'</div>',
+				'<div class="new">',
+				@$add,
+				'</div>',
+			'</div>';
+	}
+}
+
+# Print context lines and then rem/add lines in inline manner.
+sub print_inline_diff_lines {
+	my ($ctx, $rem, $add) = @_;
+
+	print @$ctx, @$rem, @$add;
+}
+
+# Format removed and added line, mark changed part and HTML-format them.
+# Implementation is based on contrib/diff-highlight
+sub format_rem_add_lines_pair {
+	my ($rem, $add, $num_parents) = @_;
+
+	# We need to untabify lines before split()'ing them;
+	# otherwise offsets would be invalid.
+	chomp $rem;
+	chomp $add;
+	$rem = untabify($rem);
+	$add = untabify($add);
+
+	my @rem = split(//, $rem);
+	my @add = split(//, $add);
+	my ($esc_rem, $esc_add);
+	# Ignore leading +/- characters for each parent.
+	my ($prefix_len, $suffix_len) = ($num_parents, 0);
+	my ($prefix_has_nonspace, $suffix_has_nonspace);
+
+	my $shorter = (@rem < @add) ? @rem : @add;
+	while ($prefix_len < $shorter) {
+		last if ($rem[$prefix_len] ne $add[$prefix_len]);
+
+		$prefix_has_nonspace = 1 if ($rem[$prefix_len] !~ /\s/);
+		$prefix_len++;
+	}
+
+	while ($prefix_len + $suffix_len < $shorter) {
+		last if ($rem[-1 - $suffix_len] ne $add[-1 - $suffix_len]);
+
+		$suffix_has_nonspace = 1 if ($rem[-1 - $suffix_len] !~ /\s/);
+		$suffix_len++;
+	}
+
+	# Mark lines that are different from each other, but have some common
+	# part that isn't whitespace.  If lines are completely different, don't
+	# mark them because that would make output unreadable, especially if
+	# diff consists of multiple lines.
+	if ($prefix_has_nonspace || $suffix_has_nonspace) {
+		$esc_rem = esc_html_hl_regions($rem, 'marked',
+		        [$prefix_len, @rem - $suffix_len], -nbsp=>1);
+		$esc_add = esc_html_hl_regions($add, 'marked',
+		        [$prefix_len, @add - $suffix_len], -nbsp=>1);
+	} else {
+		$esc_rem = esc_html($rem, -nbsp=>1);
+		$esc_add = esc_html($add, -nbsp=>1);
+	}
+
+	return format_diff_line(\$esc_rem, 'rem'),
+	       format_diff_line(\$esc_add, 'add');
+}
+
+# HTML-format diff context, removed and added lines.
+sub format_ctx_rem_add_lines {
+	my ($ctx, $rem, $add, $num_parents) = @_;
+	my (@new_ctx, @new_rem, @new_add);
+	my $can_highlight = 0;
+	my $is_combined = ($num_parents > 1);
+
+	# Highlight if every removed line has a corresponding added line.
+	if (@$add > 0 && @$add == @$rem) {
+		$can_highlight = 1;
+
+		# Highlight lines in combined diff only if the chunk contains
+		# diff between the same version, e.g.
+		#
+		#    - a
+		#   -  b
+		#    + c
+		#   +  d
+		#
+		# Otherwise the highlightling would be confusing.
+		if ($is_combined) {
+			for (my $i = 0; $i < @$add; $i++) {
+				my $prefix_rem = substr($rem->[$i], 0, $num_parents);
+				my $prefix_add = substr($add->[$i], 0, $num_parents);
+
+				$prefix_rem =~ s/-/+/g;
+
+				if ($prefix_rem ne $prefix_add) {
+					$can_highlight = 0;
+					last;
+				}
+			}
+		}
+	}
+
+	if ($can_highlight) {
+		for (my $i = 0; $i < @$add; $i++) {
+			my ($line_rem, $line_add) = format_rem_add_lines_pair(
+			        $rem->[$i], $add->[$i], $num_parents);
+			push @new_rem, $line_rem;
+			push @new_add, $line_add;
+		}
+	} else {
+		@new_rem = map { format_diff_line($_, 'rem') } @$rem;
+		@new_add = map { format_diff_line($_, 'add') } @$add;
+	}
+
+	@new_ctx = map { format_diff_line($_, 'ctx') } @$ctx;
+
+	return (\@new_ctx, \@new_rem, \@new_add);
+}
+
+# Print context lines and then rem/add lines.
+sub print_diff_lines {
+	my ($ctx, $rem, $add, $diff_style, $num_parents) = @_;
+	my $is_combined = $num_parents > 1;
+
+	($ctx, $rem, $add) = format_ctx_rem_add_lines($ctx, $rem, $add,
+	        $num_parents);
+
+	if ($diff_style eq 'sidebyside' && !$is_combined) {
+		print_sidebyside_diff_lines($ctx, $rem, $add);
+	} else {
+		# default 'inline' style and unknown styles
+		print_inline_diff_lines($ctx, $rem, $add);
+	}
+}
+
+sub print_diff_chunk {
+	my ($diff_style, $num_parents, $from, $to, @chunk) = @_;
 	my (@ctx, @rem, @add);
+
+	# The class of the previous line.
+	my $prev_class = '';
 
 	return unless @chunk;
 
@@ -4943,55 +5238,19 @@ sub print_sidebyside_diff_chunk {
 
 		# print chunk headers
 		if ($class && $class eq 'chunk_header') {
-			print $line;
+			print format_diff_line($line, $class, $from, $to);
 			next;
 		}
 
-		## print from accumulator when type of class of lines change
-		# empty contents block on start rem/add block, or end of chunk
-		if (@ctx && (!$class || $class eq 'rem' || $class eq 'add')) {
-			print join '',
-				'<div class="chunk_block ctx">',
-					'<div class="old">',
-					@ctx,
-					'</div>',
-					'<div class="new">',
-					@ctx,
-					'</div>',
-				'</div>';
-			@ctx = ();
-		}
-		# empty add/rem block on start context block, or end of chunk
-		if ((@rem || @add) && (!$class || $class eq 'ctx')) {
-			if (!@add) {
-				# pure removal
-				print join '',
-					'<div class="chunk_block rem">',
-						'<div class="old">',
-						@rem,
-						'</div>',
-					'</div>';
-			} elsif (!@rem) {
-				# pure addition
-				print join '',
-					'<div class="chunk_block add">',
-						'<div class="new">',
-						@add,
-						'</div>',
-					'</div>';
-			} else {
-				# assume that it is change
-				print join '',
-					'<div class="chunk_block chg">',
-						'<div class="old">',
-						@rem,
-						'</div>',
-						'<div class="new">',
-						@add,
-						'</div>',
-					'</div>';
-			}
-			@rem = @add = ();
+		## print from accumulator when have some add/rem lines or end
+		# of chunk (flush context lines), or when have add and rem
+		# lines and new block is reached (otherwise add/rem lines could
+		# be reordered)
+		if (!$class || ((@rem || @add) && $class eq 'ctx') ||
+		    (@rem && @add && $class ne $prev_class)) {
+			print_diff_lines(\@ctx, \@rem, \@add,
+		                         $diff_style, $num_parents);
+			@ctx = @rem = @add = ();
 		}
 
 		## adding lines to accumulator
@@ -5007,6 +5266,8 @@ sub print_sidebyside_diff_chunk {
 		if ($class eq 'ctx') {
 			push @ctx, $line;
 		}
+
+		$prev_class = $class;
 	}
 }
 
@@ -5128,27 +5389,19 @@ sub git_patchset_body {
 
 			next PATCH if ($patch_line =~ m/^diff /);
 
-			my ($class, $line) = process_diff_line($patch_line, \%from, \%to);
-			my $diff_classes = "diff";
-			$diff_classes .= " $class" if ($class);
-			$line = "<div class=\"$diff_classes\">$line</div>\n";
+			my $class = diff_line_class($patch_line, \%from, \%to);
 
-			if ($diff_style eq 'sidebyside' && !$is_combined) {
-				if ($class eq 'chunk_header') {
-					print_sidebyside_diff_chunk(@chunk);
-					@chunk = ( [ $class, $line ] );
-				} else {
-					push @chunk, [ $class, $line ];
-				}
-			} else {
-				# default 'inline' style and unknown styles
-				print $line;
+			if ($class eq 'chunk_header') {
+				print_diff_chunk($diff_style, scalar @hash_parents, \%from, \%to, @chunk);
+				@chunk = ();
 			}
+
+			push @chunk, [ $class, $patch_line ];
 		}
 
 	} continue {
 		if (@chunk) {
-			print_sidebyside_diff_chunk(@chunk);
+			print_diff_chunk($diff_style, scalar @hash_parents, \%from, \%to, @chunk);
 			@chunk = ();
 		}
 		print "</div>\n"; # class="patch"
@@ -5184,7 +5437,7 @@ sub git_patchset_body {
 # . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
 
 sub git_project_search_form {
-	my ($searchtext, $search_use_regexp);
+	my ($searchtext, $search_use_regexp) = @_;
 
 	my $limit = '';
 	if ($project_filter) {
@@ -5211,35 +5464,70 @@ sub git_project_search_form {
 	print "</div>\n";
 }
 
-# fills project list info (age, description, owner, category, forks)
+# entry for given @keys needs filling if at least one of keys in list
+# is not present in %$project_info
+sub project_info_needs_filling {
+	my ($project_info, @keys) = @_;
+
+	# return List::MoreUtils::any { !exists $project_info->{$_} } @keys;
+	foreach my $key (@keys) {
+		if (!exists $project_info->{$key}) {
+			return 1;
+		}
+	}
+	return;
+}
+
+# fills project list info (age, description, owner, category, forks, etc.)
 # for each project in the list, removing invalid projects from
-# returned list
+# returned list, or fill only specified info.
+#
+# Invalid projects are removed from the returned list if and only if you
+# ask 'age' or 'age_string' to be filled, because they are the only fields
+# that run unconditionally git command that requires repository, and
+# therefore do always check if project repository is invalid.
+#
+# USAGE:
+# * fill_project_list_info(\@project_list, 'descr_long', 'ctags')
+#   ensures that 'descr_long' and 'ctags' fields are filled
+# * @project_list = fill_project_list_info(\@project_list)
+#   ensures that all fields are filled (and invalid projects removed)
+#
 # NOTE: modifies $projlist, but does not remove entries from it
 sub fill_project_list_info {
-	my $projlist = shift;
+	my ($projlist, @wanted_keys) = @_;
 	my @projects;
+	my $filter_set = sub { return @_; };
+	if (@wanted_keys) {
+		my %wanted_keys = map { $_ => 1 } @wanted_keys;
+		$filter_set = sub { return grep { $wanted_keys{$_} } @_; };
+	}
 
 	my $show_ctags = gitweb_check_feature('ctags');
  PROJECT:
 	foreach my $pr (@$projlist) {
-		my (@activity) = git_get_last_activity($pr->{'path'});
-		unless (@activity) {
-			next PROJECT;
+		if (project_info_needs_filling($pr, $filter_set->('age', 'age_string'))) {
+			my (@activity) = git_get_last_activity($pr->{'path'});
+			unless (@activity) {
+				next PROJECT;
+			}
+			($pr->{'age'}, $pr->{'age_string'}) = @activity;
 		}
-		($pr->{'age'}, $pr->{'age_string'}) = @activity;
-		if (!defined $pr->{'descr'}) {
+		if (project_info_needs_filling($pr, $filter_set->('descr', 'descr_long'))) {
 			my $descr = git_get_project_description($pr->{'path'}) || "";
 			$descr = to_utf8($descr);
 			$pr->{'descr_long'} = $descr;
 			$pr->{'descr'} = chop_str($descr, $projects_list_description_width, 5);
 		}
-		if (!defined $pr->{'owner'}) {
+		if (project_info_needs_filling($pr, $filter_set->('owner'))) {
 			$pr->{'owner'} = git_get_project_owner("$pr->{'path'}") || "";
 		}
-		if ($show_ctags) {
+		if ($show_ctags &&
+		    project_info_needs_filling($pr, $filter_set->('ctags'))) {
 			$pr->{'ctags'} = git_get_project_ctags($pr->{'path'});
 		}
-		if ($projects_list_group_categories && !defined $pr->{'category'}) {
+		if ($projects_list_group_categories &&
+		    project_info_needs_filling($pr, $filter_set->('category'))) {
 			my $cat = git_get_project_category($pr->{'path'}) ||
 			                                   $project_list_default_category;
 			$pr->{'category'} = to_utf8($cat);
@@ -5343,14 +5631,25 @@ sub git_project_list_rows {
 			print "</td>\n";
 		}
 		print "<td>" . $cgi->a({-href => href(project=>$pr->{'path'}, action=>"summary"),
-		                        -class => "list"}, esc_html($pr->{'path'})) . "</td>\n" .
+		                        -class => "list"},
+		                       esc_html_match_hl($pr->{'path'}, $search_regexp)) .
+		      "</td>\n" .
 		      "<td>" . $cgi->a({-href => href(project=>$pr->{'path'}, action=>"summary"),
-		                        -class => "list", -title => $pr->{'descr_long'}},
-		                        esc_html($pr->{'descr'})) . "</td>\n" .
-		      "<td><i>" . chop_and_escape_str($pr->{'owner'}, 15) . "</i></td>\n";
-		print "<td class=\"". age_class($pr->{'age'}) . "\">" .
-		      (defined $pr->{'age_string'} ? $pr->{'age_string'} : "No commits") . "</td>\n" .
-		      "<td class=\"link\">" .
+		                        -class => "list",
+		                        -title => $pr->{'descr_long'}},
+		                        $search_regexp
+		                        ? esc_html_match_hl_chopped($pr->{'descr_long'},
+		                                                    $pr->{'descr'}, $search_regexp)
+		                        : esc_html($pr->{'descr'})) .
+		      "</td>\n";
+		unless ($omit_owner) {
+		        print "<td><i>" . chop_and_escape_str($pr->{'owner'}, 15) . "</i></td>\n";
+		}
+		unless ($omit_age_column) {
+		        print "<td class=\"". age_class($pr->{'age'}) . "\">" .
+		            (defined $pr->{'age_string'} ? $pr->{'age_string'} : "No commits") . "</td>\n";
+		}
+		print"<td class=\"link\">" .
 		      $cgi->a({-href => href(project=>$pr->{'path'}, action=>"summary")}, "summary")   . " | " .
 		      $cgi->a({-href => href(project=>$pr->{'path'}, action=>"shortlog")}, "shortlog") . " | " .
 		      $cgi->a({-href => href(project=>$pr->{'path'}, action=>"log")}, "log") . " | " .
@@ -5370,17 +5669,21 @@ sub git_project_list_body {
 	my $show_ctags  = gitweb_check_feature('ctags');
 	my $tagfilter = $show_ctags ? $input_params{'ctag'} : undef;
 	$check_forks = undef
-		if ($tagfilter || $searchtext);
+		if ($tagfilter || $search_regexp);
 
 	# filtering out forks before filling info allows to do less work
 	@projects = filter_forks_from_projects_list(\@projects)
 		if ($check_forks);
-	@projects = fill_project_list_info(\@projects);
-	# searching projects require filling to be run before it
+	# search_projects_list pre-fills required info
 	@projects = search_projects_list(\@projects,
-	                                 'searchtext' => $searchtext,
+	                                 'search_regexp' => $search_regexp,
 	                                 'tagfilter'  => $tagfilter)
-		if ($tagfilter || $searchtext);
+		if ($tagfilter || $search_regexp);
+	# fill the rest
+	my @all_fields = ('descr', 'descr_long', 'ctags', 'category');
+	push @all_fields, ('age', 'age_string') unless($omit_age_column);
+	push @all_fields, 'owner' unless($omit_owner);
+	@projects = fill_project_list_info(\@projects, @all_fields);
 
 	$order ||= $default_projects_order;
 	$from = 0 unless defined $from;
@@ -5411,8 +5714,8 @@ sub git_project_list_body {
 		}
 		print_sort_th('project', $order, 'Project');
 		print_sort_th('descr', $order, 'Description');
-		print_sort_th('owner', $order, 'Owner');
-		print_sort_th('age', $order, 'Last Change');
+		print_sort_th('owner', $order, 'Owner') unless $omit_owner;
+		print_sort_th('age', $order, 'Last Change') unless $omit_age_column;
 		print "<th></th>\n" . # for links
 		      "</tr>\n";
 	}
@@ -5656,7 +5959,7 @@ sub git_tags_body {
 
 sub git_heads_body {
 	# uses global variable $project
-	my ($headlist, $head, $from, $to, $extra) = @_;
+	my ($headlist, $head_at, $from, $to, $extra) = @_;
 	$from = 0 unless defined $from;
 	$to = $#{$headlist} if (!defined $to || $#{$headlist} < $to);
 
@@ -5665,7 +5968,7 @@ sub git_heads_body {
 	for (my $i = $from; $i <= $to; $i++) {
 		my $entry = $headlist->[$i];
 		my %ref = %$entry;
-		my $curr = $ref{'id'} eq $head;
+		my $curr = defined $head_at && $ref{'id'} eq $head_at;
 		if ($alternate) {
 			print "<tr class=\"dark\">\n";
 		} else {
@@ -5938,9 +6241,10 @@ sub git_search_files {
 	my $alternate = 1;
 	my $matches = 0;
 	my $lastfile = '';
+	my $file_href;
 	while (my $line = <$fd>) {
 		chomp $line;
-		my ($file, $file_href, $lno, $ltext, $binary);
+		my ($file, $lno, $ltext, $binary);
 		last if ($matches++ > 1000);
 		if ($line =~ /^Binary file (.+) matches$/) {
 			$file = $1;
@@ -6164,8 +6468,10 @@ sub git_summary {
 
 	print "<div class=\"title\">&nbsp;</div>\n";
 	print "<table class=\"projects_list\">\n" .
-	      "<tr id=\"metadata_desc\"><td>description</td><td>" . esc_html($descr) . "</td></tr>\n" .
-	      "<tr id=\"metadata_owner\"><td>owner</td><td>" . esc_html($owner) . "</td></tr>\n";
+	      "<tr id=\"metadata_desc\"><td>description</td><td>" . esc_html($descr) . "</td></tr>\n";
+        unless ($omit_owner) {
+	        print  "<tr id=\"metadata_owner\"><td>owner</td><td>" . esc_html($owner) . "</td></tr>\n";
+        }
 	if (defined $cd{'rfc2822'}) {
 		print "<tr id=\"metadata_lchange\"><td>last change</td>" .
 		      "<td>".format_timestamp_html(\%cd)."</td></tr>\n";
@@ -6965,6 +7271,28 @@ sub snapshot_name {
 	return wantarray ? ($name, $name) : $name;
 }
 
+sub exit_if_unmodified_since {
+	my ($latest_epoch) = @_;
+	our $cgi;
+
+	my $if_modified = $cgi->http('IF_MODIFIED_SINCE');
+	if (defined $if_modified) {
+		my $since;
+		if (eval { require HTTP::Date; 1; }) {
+			$since = HTTP::Date::str2time($if_modified);
+		} elsif (eval { require Time::ParseDate; 1; }) {
+			$since = Time::ParseDate::parsedate($if_modified, GMT => 1);
+		}
+		if (defined $since && $latest_epoch <= $since) {
+			my %latest_date = parse_date($latest_epoch);
+			print $cgi->header(
+				-last_modified => $latest_date{'rfc2822'},
+				-status => '304 Not Modified');
+			goto DONE_GITWEB;
+		}
+	}
+}
+
 sub git_snapshot {
 	my $format = $input_params{'snapshot_format'};
 	if (!@snapshot_fmts) {
@@ -6991,6 +7319,10 @@ sub git_snapshot {
 
 	my ($name, $prefix) = snapshot_name($project, $hash);
 	my $filename = "$name$known_snapshot_formats{$format}{'suffix'}";
+
+	my %co = parse_commit($hash);
+	exit_if_unmodified_since($co{'committer_epoch'}) if %co;
+
 	my $cmd = quote_command(
 		git_cmd(), 'archive',
 		"--format=$known_snapshot_formats{$format}{'format'}",
@@ -7000,9 +7332,15 @@ sub git_snapshot {
 	}
 
 	$filename =~ s/(["\\])/\\$1/g;
+	my %latest_date;
+	if (%co) {
+		%latest_date = parse_date($co{'committer_epoch'}, $co{'committer_tz'});
+	}
+
 	print $cgi->header(
 		-type => $known_snapshot_formats{$format}{'type'},
 		-content_disposition => 'inline; filename="' . $filename . '"',
+		%co ? (-last_modified => $latest_date{'rfc2822'}) : (),
 		-status => '200 OK');
 
 	open my $fd, "-|", $cmd
@@ -7782,33 +8120,14 @@ sub git_feed {
 	if (defined($commitlist[0])) {
 		%latest_commit = %{$commitlist[0]};
 		my $latest_epoch = $latest_commit{'committer_epoch'};
-		%latest_date   = parse_date($latest_epoch, $latest_commit{'comitter_tz'});
-		my $if_modified = $cgi->http('IF_MODIFIED_SINCE');
-		if (defined $if_modified) {
-			my $since;
-			if (eval { require HTTP::Date; 1; }) {
-				$since = HTTP::Date::str2time($if_modified);
-			} elsif (eval { require Time::ParseDate; 1; }) {
-				$since = Time::ParseDate::parsedate($if_modified, GMT => 1);
-			}
-			if (defined $since && $latest_epoch <= $since) {
-				print $cgi->header(
-					-type => $content_type,
-					-charset => 'utf-8',
-					-last_modified => $latest_date{'rfc2822'},
-					-status => '304 Not Modified');
-				return;
-			}
-		}
-		print $cgi->header(
-			-type => $content_type,
-			-charset => 'utf-8',
-			-last_modified => $latest_date{'rfc2822'});
-	} else {
-		print $cgi->header(
-			-type => $content_type,
-			-charset => 'utf-8');
+		exit_if_unmodified_since($latest_epoch);
+		%latest_date = parse_date($latest_epoch, $latest_commit{'comitter_tz'});
 	}
+	print $cgi->header(
+		-type => $content_type,
+		-charset => 'utf-8',
+		%latest_date ? (-last_modified => $latest_date{'rfc2822'}) : (),
+		-status => '200 OK');
 
 	# Optimization: skip generating the body if client asks only
 	# for Last-Modified date.

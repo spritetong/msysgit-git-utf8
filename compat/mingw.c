@@ -1249,7 +1249,7 @@ static int try_shell_exec(const char *cmd, char *const *argv)
 	return pid;
 }
 
-void mingw_execv(const char *cmd, char *const *argv)
+int mingw_execv(const char *cmd, char *const *argv)
 {
 	/* check if git_command is a shell script */
 	if (!try_shell_exec(cmd, argv)) {
@@ -1257,14 +1257,15 @@ void mingw_execv(const char *cmd, char *const *argv)
 
 		pid = mingw_spawnv(cmd, (const char **)argv, 0);
 		if (pid < 0)
-			return;
+			return -1;
 		if (waitpid(pid, &status, 0) < 0)
 			status = 255;
 		exit(status);
 	}
+	return -1;
 }
 
-void mingw_execvp(const char *cmd, char *const *argv)
+int mingw_execvp(const char *cmd, char *const *argv)
 {
 	char **path = get_path_split();
 	char *prog = path_lookup(cmd, path, 0);
@@ -1276,6 +1277,7 @@ void mingw_execvp(const char *cmd, char *const *argv)
 		errno = ENOENT;
 
 	free_path_split(path);
+	return -1;
 }
 
 int mingw_kill(pid_t pid, int sig)
@@ -1589,6 +1591,7 @@ int mingw_accept(int sockfd1, struct sockaddr *sa, socklen_t *sz)
 	return sockfd2;
 }
 
+#undef rename
 int mingw_rename(const char *pold, const char *pnew)
 {
 	DWORD attrs, gle;
@@ -2050,6 +2053,11 @@ int xwcstoutf(char *utf, const wchar_t *wcs, size_t utflen)
 	return -1;
 }
 
+#ifdef __XUTF8_ENABLED__ /* For UTF-8. Changed by Sprite Tong, 2/17/2012. */
+void mingw_startup()
+{
+#else /* !__XUTF8_ENABLED__ */
+
 /*
  * Disable MSVCRT command line wildcard expansion (__getmainargs called from
  * mingw startup code, see init.c in mingw runtime).
@@ -2063,17 +2071,37 @@ typedef struct {
 extern int __wgetmainargs(int *argc, wchar_t ***argv, wchar_t ***env, int glob,
 		_startupinfo *si);
 
+static NORETURN void die_startup()
+{
+	fputs("fatal: not enough memory for initialization", stderr);
+	exit(128);
+}
+
+static void *malloc_startup(size_t size)
+{
+	void *result = malloc(size);
+	if (!result)
+		die_startup();
+	return result;
+}
+
+static char *wcstoutfdup_startup(char *buffer, const wchar_t *wcs, size_t len)
+{
+	len = xwcstoutf(buffer, wcs, len) + 1;
+	return memcpy(malloc_startup(len), buffer, len);
+}
+
 void mingw_startup()
 {
-#ifndef __XUTF8_ENABLED__ /* For UTF-8. Changed by Sprite Tong, 2/17/2012. */
-	int i, len, maxlen, argc;
+	int i, maxlen, argc;
 	char *buffer;
 	wchar_t **wenv, **wargv;
 	_startupinfo si;
 
 	/* get wide char arguments and environment */
 	si.newmode = 0;
-	__wgetmainargs(&argc, &wargv, &wenv, _CRT_glob, &si);
+	if (__wgetmainargs(&argc, &wargv, &wenv, _CRT_glob, &si) < 0)
+		die_startup();
 
 	/* determine size of argv and environ conversion buffer */
 	maxlen = wcslen(_wpgmptr);
@@ -2082,31 +2110,31 @@ void mingw_startup()
 	for (i = 0; wenv[i]; i++)
 		maxlen = max(maxlen, wcslen(wenv[i]));
 
-	/* nedmalloc can't free CRT memory, allocate resizable environment list */
-	environ = NULL;
+	/*
+	 * nedmalloc can't free CRT memory, allocate resizable environment
+	 * list. Note that xmalloc / xmemdupz etc. call getenv, so we cannot
+	 * use it while initializing the environment itself.
+	 */
 	environ_size = i + 1;
-	ALLOC_GROW(environ, environ_size * sizeof(char*), environ_alloc);
+	environ_alloc = alloc_nr(environ_size * sizeof(char*));
+	environ = malloc_startup(environ_alloc);
 
 	/* allocate buffer (wchar_t encodes to max 3 UTF-8 bytes) */
 	maxlen = 3 * maxlen + 1;
-	buffer = xmalloc(maxlen);
+	buffer = malloc_startup(maxlen);
 
 	/* convert command line arguments and environment to UTF-8 */
-	len = xwcstoutf(buffer, _wpgmptr, maxlen);
-	__argv[0] = xmemdupz(buffer, len);
-	for (i = 1; i < argc; i++) {
-		len = xwcstoutf(buffer, wargv[i], maxlen);
-		__argv[i] = xmemdupz(buffer, len);
-	}
-	for (i = 0; wenv[i]; i++) {
-		len = xwcstoutf(buffer, wenv[i], maxlen);
-		environ[i] = xmemdupz(buffer, len);
-	}
+	__argv[0] = wcstoutfdup_startup(buffer, _wpgmptr, maxlen);
+	for (i = 1; i < argc; i++)
+		__argv[i] = wcstoutfdup_startup(buffer, wargv[i], maxlen);
+	for (i = 0; wenv[i]; i++)
+		environ[i] = wcstoutfdup_startup(buffer, wenv[i], maxlen);
 	environ[i] = NULL;
 	free(buffer);
 
 	/* sort environment for O(log n) getenv / putenv */
 	qsort(environ, i, sizeof(char*), compareenv);
+
 #endif /* __XUTF8_ENABLED__ */
 
 	/* fix Windows specific environment settings */

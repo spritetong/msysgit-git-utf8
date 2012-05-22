@@ -19,6 +19,7 @@
 #include "pack-revindex.h"
 #include "sha1-lookup.h"
 #include "bulk-checkin.h"
+#include "streaming.h"
 
 #ifndef O_NOATIME
 #if defined(__linux__) && (defined(__i386__) || defined(__PPC__))
@@ -228,7 +229,6 @@ char *sha1_pack_index_name(const unsigned char *sha1)
 struct alternate_object_database *alt_odb_list;
 static struct alternate_object_database **alt_odb_tail;
 
-static void read_info_alternates(const char * alternates, int depth);
 static int git_open_noatime(const char *name);
 
 /*
@@ -353,7 +353,7 @@ static void link_alt_odb_entries(const char *alt, const char *ep, int sep,
 	}
 }
 
-static void read_info_alternates(const char * relative_base, int depth)
+void read_info_alternates(const char * relative_base, int depth)
 {
 	char *map;
 	size_t mapsz;
@@ -1146,10 +1146,47 @@ static const struct packed_git *has_packed_and_bad(const unsigned char *sha1)
 	return NULL;
 }
 
-int check_sha1_signature(const unsigned char *sha1, void *map, unsigned long size, const char *type)
+/*
+ * With an in-core object data in "map", rehash it to make sure the
+ * object name actually matches "sha1" to detect object corruption.
+ * With "map" == NULL, try reading the object named with "sha1" using
+ * the streaming interface and rehash it to do the same.
+ */
+int check_sha1_signature(const unsigned char *sha1, void *map,
+			 unsigned long size, const char *type)
 {
 	unsigned char real_sha1[20];
-	hash_sha1_file(map, size, type, real_sha1);
+	enum object_type obj_type;
+	struct git_istream *st;
+	git_SHA_CTX c;
+	char hdr[32];
+	int hdrlen;
+
+	if (map) {
+		hash_sha1_file(map, size, type, real_sha1);
+		return hashcmp(sha1, real_sha1) ? -1 : 0;
+	}
+
+	st = open_istream(sha1, &obj_type, &size, NULL);
+	if (!st)
+		return -1;
+
+	/* Generate the header */
+	hdrlen = sprintf(hdr, "%s %lu", typename(obj_type), size) + 1;
+
+	/* Sha1.. */
+	git_SHA1_Init(&c);
+	git_SHA1_Update(&c, hdr, hdrlen);
+	for (;;) {
+		char buf[1024 * 16];
+		ssize_t readlen = read_istream(st, buf, sizeof(buf));
+
+		if (!readlen)
+			break;
+		git_SHA1_Update(&c, buf, readlen);
+	}
+	git_SHA1_Final(real_sha1, &c);
+	close_istream(st);
 	return hashcmp(sha1, real_sha1) ? -1 : 0;
 }
 
@@ -2379,7 +2416,7 @@ int move_temp_to_file(const char *tmpfile, const char *filename)
 	unlink_or_warn(tmpfile);
 	if (ret) {
 		if (ret != EEXIST) {
-			return error("unable to write sha1 filename %s: %s\n", filename, strerror(ret));
+			return error("unable to write sha1 filename %s: %s", filename, strerror(ret));
 		}
 		/* FIXME!!! Collision check here ? */
 	}
@@ -2471,9 +2508,9 @@ static int write_loose_object(const unsigned char *sha1, char *hdr, int hdrlen,
 	fd = create_tmpfile(tmp_file, sizeof(tmp_file), filename);
 	if (fd < 0) {
 		if (errno == EACCES)
-			return error("insufficient permission for adding an object to repository database %s\n", get_object_directory());
+			return error("insufficient permission for adding an object to repository database %s", get_object_directory());
 		else
-			return error("unable to create temporary sha1 filename %s: %s\n", tmp_file, strerror(errno));
+			return error("unable to create temporary file: %s", strerror(errno));
 	}
 
 	/* Set it up */
@@ -2700,10 +2737,13 @@ static int index_core(unsigned char *sha1, int fd, size_t size,
  * This also bypasses the usual "convert-to-git" dance, and that is on
  * purpose. We could write a streaming version of the converting
  * functions and insert that before feeding the data to fast-import
- * (or equivalent in-core API described above), but the primary
- * motivation for trying to stream from the working tree file and to
- * avoid mmaping it in core is to deal with large binary blobs, and
- * by definition they do _not_ want to get any conversion.
+ * (or equivalent in-core API described above). However, that is
+ * somewhat complicated, as we do not know the size of the filter
+ * result, which we need to know beforehand when writing a git object.
+ * Since the primary motivation for trying to stream from the working
+ * tree file and to avoid mmaping it in core is to deal with large
+ * binary blobs, they generally do not want to get any conversion, and
+ * callers should avoid this code path when filters are requested.
  */
 static int index_stream(unsigned char *sha1, int fd, size_t size,
 			enum object_type type, const char *path,
@@ -2720,7 +2760,8 @@ int index_fd(unsigned char *sha1, int fd, struct stat *st,
 
 	if (!S_ISREG(st->st_mode))
 		ret = index_pipe(sha1, fd, type, path, flags);
-	else if (size <= big_file_threshold || type != OBJ_BLOB)
+	else if (size <= big_file_threshold || type != OBJ_BLOB ||
+		 (path && would_convert_to_git(path, NULL, 0, 0)))
 		ret = index_core(sha1, fd, size, type, path, flags);
 	else
 		ret = index_stream(sha1, fd, size, type, path, flags);

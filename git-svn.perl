@@ -1,4 +1,4 @@
-#!/usr/bin/env perl
+#!/usr/bin/perl
 # Copyright (C) 2006, Eric Wong <normalperson@yhbt.net>
 # License: GPL v2 or later
 use 5.008;
@@ -36,11 +36,33 @@ $ENV{TZ} = 'UTC';
 $| = 1; # unbuffer STDOUT
 
 sub fatal (@) { print STDERR "@_\n"; exit 1 }
+
+# All SVN commands do it.  Otherwise we may die on SIGPIPE when the remote
+# repository decides to close the connection which we expect to be kept alive.
+$SIG{PIPE} = 'IGNORE';
+
+# Given a dot separated version number, "subtract" it from
+# the SVN::Core::VERSION; non-negaitive return means the SVN::Core
+# is at least at the version the caller asked for.
+sub compare_svn_version {
+	my (@ours) = split(/\./, $SVN::Core::VERSION);
+	my (@theirs) = split(/\./, $_[0]);
+	my ($i, $diff);
+
+	for ($i = 0; $i < @ours && $i < @theirs; $i++) {
+		$diff = $ours[$i] - $theirs[$i];
+		return $diff if ($diff);
+	}
+	return 1 if ($i < @ours);
+	return -1 if ($i < @theirs);
+	return 0;
+}
+
 sub _req_svn {
 	require SVN::Core; # use()-ing this causes segfaults for me... *shrug*
 	require SVN::Ra;
 	require SVN::Delta;
-	if ($SVN::Core::VERSION lt '1.1.0') {
+	if (::compare_svn_version('1.1.0') < 0) {
 		fatal "Need SVN::Core 1.1.0 or better (got $SVN::Core::VERSION)";
 	}
 }
@@ -84,7 +106,7 @@ my ($_stdin, $_help, $_edit,
 	$_message, $_file, $_branch_dest,
 	$_template, $_shared,
 	$_version, $_fetch_all, $_no_rebase, $_fetch_parent,
-	$_merge, $_strategy, $_dry_run, $_local,
+	$_merge, $_strategy, $_preserve_merges, $_dry_run, $_local,
 	$_prefix, $_no_checkout, $_url, $_verbose,
 	$_git_format, $_commit_url, $_tag, $_merge_info, $_interactive);
 $Git::SVN::_follow_parent = 1;
@@ -233,6 +255,7 @@ my %cmd = (
 			  'local|l' => \$_local,
 			  'fetch-all|all' => \$_fetch_all,
 			  'dry-run|n' => \$_dry_run,
+			  'preserve-merges|p' => \$_preserve_merges,
 			  %fc_opts } ],
 	'commit-diff' => [ \&cmd_commit_diff,
 	                   'Commit a diff between two trees',
@@ -1469,7 +1492,7 @@ sub cmd_info {
 	}
 	::_req_svn();
 	$result .= "Repository UUID: $uuid\n" unless $diff_status eq "A" &&
-		($SVN::Core::VERSION le '1.5.4' || $file_type ne "dir");
+		(::compare_svn_version('1.5.4') <= 0 || $file_type ne "dir");
 	$result .= "Revision: " . ($diff_status eq "A" ? 0 : $rev) . "\n";
 
 	$result .= "Node Kind: " .
@@ -1570,6 +1593,7 @@ sub rebase_cmd {
 	push @cmd, '-v' if $_verbose;
 	push @cmd, qw/--merge/ if $_merge;
 	push @cmd, "--strategy=$_strategy" if $_strategy;
+	push @cmd, "--preserve-merges" if $_preserve_merges;
 	@cmd;
 }
 
@@ -1878,8 +1902,7 @@ sub cmt_sha2rev_batch {
 
 sub working_head_info {
 	my ($head, $refs) = @_;
-	my @args = qw/log --no-color --no-decorate --first-parent
-	              --pretty=medium/;
+	my @args = qw/rev-list --first-parent --pretty=medium/;
 	my ($fh, $ctx) = command_output_pipe(@args, $head);
 	my $hash;
 	my %max;
@@ -2029,8 +2052,10 @@ use Carp qw/croak/;
 use File::Path qw/mkpath/;
 use File::Copy qw/copy/;
 use IPC::Open3;
+use Time::Local;
 use Memoize;  # core since 5.8.0, Jul 2002
 use Memoize::Storable;
+use POSIX qw(:signal_h);
 
 my ($_gc_nr, $_gc_period);
 
@@ -3287,6 +3312,14 @@ sub get_untracked {
 	\@out;
 }
 
+sub get_tz {
+	# some systmes don't handle or mishandle %z, so be creative.
+	my $t = shift || time;
+	my $gm = timelocal(gmtime($t));
+	my $sign = qw( + + - )[ $t <=> $gm ];
+	return sprintf("%s%02d%02d", $sign, (gmtime(abs($t - $gm)))[2,1]);
+}
+
 # parse_svn_date(DATE)
 # --------------------
 # Given a date (in UTC) from Subversion, return a string in the format
@@ -3319,8 +3352,7 @@ sub parse_svn_date {
 			delete $ENV{TZ};
 		}
 
-		my $our_TZ =
-		    POSIX::strftime('%Z', $S, $M, $H, $d, $m - 1, $Y - 1900);
+		my $our_TZ = get_tz();
 
 		# This converts $epoch_in_UTC into our local timezone.
 		my ($sec, $min, $hour, $mday, $mon, $year,
@@ -3920,7 +3952,7 @@ sub rebuild {
 	my ($base_rev, $head) = ($partial ? $self->rev_map_max_norebuild(1) :
 		(undef, undef));
 	my ($log, $ctx) =
-	    command_output_pipe(qw/rev-list --pretty=raw --no-color --reverse/,
+	    command_output_pipe(qw/rev-list --pretty=raw --reverse/,
 				($head ? "$head.." : "") . $self->refname,
 				'--');
 	my $metadata_url = $self->metadata_url;
@@ -4052,11 +4084,14 @@ sub rev_map_set {
 	length $commit == 40 or die "arg3 must be a full SHA1 hexsum\n";
 	my $db = $self->map_path($uuid);
 	my $db_lock = "$db.lock";
-	my $sig;
+	my $sigmask;
 	$update_ref ||= 0;
 	if ($update_ref) {
-		$SIG{INT} = $SIG{HUP} = $SIG{TERM} = $SIG{ALRM} = $SIG{PIPE} =
-		            $SIG{USR1} = $SIG{USR2} = sub { $sig = $_[0] };
+		$sigmask = POSIX::SigSet->new();
+		my $signew = POSIX::SigSet->new(SIGINT, SIGHUP, SIGTERM,
+			SIGALRM, SIGUSR1, SIGUSR2);
+		sigprocmask(SIG_BLOCK, $signew, $sigmask) or
+			croak "Can't block signals: $!";
 	}
 	mkfile($db);
 
@@ -4095,9 +4130,8 @@ sub rev_map_set {
 	                            "$db_lock => $db ($!)\n";
 	delete $LOCKFILES{$db_lock};
 	if ($update_ref) {
-		$SIG{INT} = $SIG{HUP} = $SIG{TERM} = $SIG{ALRM} = $SIG{PIPE} =
-		            $SIG{USR1} = $SIG{USR2} = 'DEFAULT';
-		kill $sig, $$ if defined $sig;
+		sigprocmask(SIG_SETMASK, $sigmask) or
+			croak "Can't restore signal mask: $!";
 	}
 }
 
@@ -5130,7 +5164,7 @@ sub rmdirs {
 }
 
 sub open_or_add_dir {
-	my ($self, $full_path, $baton) = @_;
+	my ($self, $full_path, $baton, $deletions) = @_;
 	my $t = $self->{types}->{$full_path};
 	if (!defined $t) {
 		die "$full_path not known in r$self->{r} or we have a bug!\n";
@@ -5139,7 +5173,7 @@ sub open_or_add_dir {
 		no warnings 'once';
 		# SVN::Node::none and SVN::Node::file are used only once,
 		# so we're shutting up Perl's warnings about them.
-		if ($t == $SVN::Node::none) {
+		if ($t == $SVN::Node::none || defined($deletions->{$full_path})) {
 			return $self->add_directory($full_path, $baton,
 			    undef, -1, $self->{pool});
 		} elsif ($t == $SVN::Node::dir) {
@@ -5154,17 +5188,18 @@ sub open_or_add_dir {
 }
 
 sub ensure_path {
-	my ($self, $path) = @_;
+	my ($self, $path, $deletions) = @_;
 	my $bat = $self->{bat};
 	my $repo_path = $self->repo_path($path);
 	return $bat->{''} unless (length $repo_path);
+
 	my @p = split m#/+#, $repo_path;
 	my $c = shift @p;
-	$bat->{$c} ||= $self->open_or_add_dir($c, $bat->{''});
+	$bat->{$c} ||= $self->open_or_add_dir($c, $bat->{''}, $deletions);
 	while (@p) {
 		my $c0 = $c;
 		$c .= '/' . shift @p;
-		$bat->{$c} ||= $self->open_or_add_dir($c, $bat->{$c0});
+		$bat->{$c} ||= $self->open_or_add_dir($c, $bat->{$c0}, $deletions);
 	}
 	return $bat->{$c};
 }
@@ -5221,9 +5256,9 @@ sub apply_autoprops {
 }
 
 sub A {
-	my ($self, $m) = @_;
+	my ($self, $m, $deletions) = @_;
 	my ($dir, $file) = split_path($m->{file_b});
-	my $pbat = $self->ensure_path($dir);
+	my $pbat = $self->ensure_path($dir, $deletions);
 	my $fbat = $self->add_file($self->repo_path($m->{file_b}), $pbat,
 					undef, -1);
 	print "\tA\t$m->{file_b}\n" unless $::_q;
@@ -5233,9 +5268,9 @@ sub A {
 }
 
 sub C {
-	my ($self, $m) = @_;
+	my ($self, $m, $deletions) = @_;
 	my ($dir, $file) = split_path($m->{file_b});
-	my $pbat = $self->ensure_path($dir);
+	my $pbat = $self->ensure_path($dir, $deletions);
 	my $fbat = $self->add_file($self->repo_path($m->{file_b}), $pbat,
 				$self->url_path($m->{file_a}), $self->{r});
 	print "\tC\t$m->{file_a} => $m->{file_b}\n" unless $::_q;
@@ -5252,9 +5287,9 @@ sub delete_entry {
 }
 
 sub R {
-	my ($self, $m) = @_;
+	my ($self, $m, $deletions) = @_;
 	my ($dir, $file) = split_path($m->{file_b});
-	my $pbat = $self->ensure_path($dir);
+	my $pbat = $self->ensure_path($dir, $deletions);
 	my $fbat = $self->add_file($self->repo_path($m->{file_b}), $pbat,
 				$self->url_path($m->{file_a}), $self->{r});
 	print "\tR\t$m->{file_a} => $m->{file_b}\n" unless $::_q;
@@ -5263,14 +5298,14 @@ sub R {
 	$self->close_file($fbat,undef,$self->{pool});
 
 	($dir, $file) = split_path($m->{file_a});
-	$pbat = $self->ensure_path($dir);
+	$pbat = $self->ensure_path($dir, $deletions);
 	$self->delete_entry($m->{file_a}, $pbat);
 }
 
 sub M {
-	my ($self, $m) = @_;
+	my ($self, $m, $deletions) = @_;
 	my ($dir, $file) = split_path($m->{file_b});
-	my $pbat = $self->ensure_path($dir);
+	my $pbat = $self->ensure_path($dir, $deletions);
 	my $fbat = $self->open_file($self->repo_path($m->{file_b}),
 				$pbat,$self->{r},$self->{pool});
 	print "\t$m->{chg}\t$m->{file_b}\n" unless $::_q;
@@ -5340,9 +5375,9 @@ sub chg_file {
 }
 
 sub D {
-	my ($self, $m) = @_;
+	my ($self, $m, $deletions) = @_;
 	my ($dir, $file) = split_path($m->{file_b});
-	my $pbat = $self->ensure_path($dir);
+	my $pbat = $self->ensure_path($dir, $deletions);
 	print "\tD\t$m->{file_b}\n" unless $::_q;
 	$self->delete_entry($m->{file_b}, $pbat);
 }
@@ -5374,11 +5409,19 @@ sub DESTROY {
 sub apply_diff {
 	my ($self) = @_;
 	my $mods = $self->{mods};
-	my %o = ( D => 1, R => 0, C => -1, A => 3, M => 3, T => 3 );
+	my %o = ( D => 0, C => 1, R => 2, A => 3, M => 4, T => 5 );
+	my %deletions;
+
+	foreach my $m (@$mods) {
+		if ($m->{chg} eq "D") {
+			$deletions{$m->{file_b}} = 1;
+		}
+	}
+
 	foreach my $m (sort { $o{$a->{chg}} <=> $o{$b->{chg}} } @$mods) {
 		my $f = $m->{chg};
 		if (defined $o{$f}) {
-			$self->$f($m);
+			$self->$f($m, \%deletions);
 		} else {
 			fatal("Invalid change type: $f");
 		}
@@ -5420,7 +5463,7 @@ BEGIN {
 }
 
 sub _auth_providers () {
-	[
+	my @rv = (
 	  SVN::Client::get_simple_provider(),
 	  SVN::Client::get_ssl_server_trust_file_provider(),
 	  SVN::Client::get_simple_prompt_provider(
@@ -5436,7 +5479,23 @@ sub _auth_providers () {
 	    \&Git::SVN::Prompt::ssl_server_trust),
 	  SVN::Client::get_username_prompt_provider(
 	    \&Git::SVN::Prompt::username, 2)
-	]
+	);
+
+	# earlier 1.6.x versions would segfault, and <= 1.5.x didn't have
+	# this function
+	if (::compare_svn_version('1.6.12') > 0) {
+		my $config = SVN::Core::config_get_config($config_dir);
+		my ($p, @a);
+		# config_get_config returns all config files from
+		# ~/.subversion, auth_get_platform_specific_client_providers
+		# just wants the config "file".
+		@a = ($config->{'config'}, undef);
+		$p = SVN::Core::auth_get_platform_specific_client_providers(@a);
+		# Insert the return value from
+		# auth_get_platform_specific_providers
+		unshift @rv, @$p;
+	}
+	\@rv;
 }
 
 sub escape_uri_only {
@@ -5583,7 +5642,7 @@ sub get_log {
 	# drop it.  Therefore, the receiver callback passed to it
 	# is made aware of this limitation by being wrapped if
 	# the limit passed to is being wrapped.
-	if ($SVN::Core::VERSION le '1.2.0') {
+	if (::compare_svn_version('1.2.0') <= 0) {
 		my $limit = splice(@args, 3, 1);
 		if ($limit > 0) {
 			my $receiver = pop @args;
@@ -5615,7 +5674,8 @@ sub trees_match {
 
 sub get_commit_editor {
 	my ($self, $log, $cb, $pool) = @_;
-	my @lock = $SVN::Core::VERSION ge '1.2.0' ? (undef, 0) : ();
+
+	my @lock = (::compare_svn_version('1.2.0') >= 0) ? (undef, 0) : ();
 	$self->SUPER::get_commit_editor($log, $cb, @lock, $pool);
 }
 
@@ -5633,7 +5693,7 @@ sub gs_do_update {
 	my (@pc) = split m#/#, $path;
 	my $reporter = $self->do_update($rev_b, (@pc ? shift @pc : ''),
 	                                1, $editor, $pool);
-	my @lock = $SVN::Core::VERSION ge '1.2.0' ? (undef) : ();
+	my @lock = (::compare_svn_version('1.2.0') >= 0) ? (undef) : ();
 
 	# Since we can't rely on svn_ra_reparent being available, we'll
 	# just have to do some magic with set_path to make it so
@@ -5683,7 +5743,7 @@ sub gs_do_switch {
 	$ra ||= $self;
 	$url_b = escape_url($url_b);
 	my $reporter = $ra->do_switch($rev_b, '', 1, $url_b, $editor, $pool);
-	my @lock = $SVN::Core::VERSION ge '1.2.0' ? (undef) : ();
+	my @lock = (::compare_svn_version('1.2.0') >= 0) ? (undef) : ();
 	$reporter->set_path('', $rev_a, 0, @lock, $pool);
 	$reporter->finish_report($pool);
 
@@ -5994,7 +6054,6 @@ package Git::SVN::Log;
 use strict;
 use warnings;
 use POSIX qw/strftime/;
-use Time::Local;
 use constant commit_log_separator => ('-' x 72) . "\n";
 use vars qw/$TZ $limit $color $pager $non_recursive $verbose $oneline
             %rusers $show_commit $incremental/;
@@ -6104,11 +6163,8 @@ sub run_pager {
 }
 
 sub format_svn_date {
-	# some systmes don't handle or mishandle %z, so be creative.
 	my $t = shift || time;
-	my $gm = timelocal(gmtime($t));
-	my $sign = qw( + + - )[ $t <=> $gm ];
-	my $gmoff = sprintf("%s%02d%02d", $sign, (gmtime(abs($t - $gm)))[2,1]);
+	my $gmoff = Git::SVN::get_tz($t);
 	return strftime("%Y-%m-%d %H:%M:%S $gmoff (%a, %d %b %Y)", localtime($t));
 }
 

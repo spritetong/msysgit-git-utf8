@@ -9,8 +9,11 @@
 #include "remote.h"
 #include "string-list.h"
 #include "thread-utils.h"
+#include "sigchain.h"
 
 static int debug;
+/* TODO: put somewhere sensible, e.g. git_transport_options? */
+static int auto_gc = 1;
 
 struct helper_data {
 	const char *name;
@@ -198,7 +201,7 @@ static struct child_process *get_helper(struct transport *transport)
 			data->import_marks = strbuf_detach(&arg, NULL);
 		} else if (mandatory) {
 			die("Unknown mandatory capability %s. This remote "
-			    "helper probably needs newer version of Git.\n",
+			    "helper probably needs newer version of Git.",
 			    capname);
 		}
 	}
@@ -220,15 +223,21 @@ static struct child_process *get_helper(struct transport *transport)
 static int disconnect_helper(struct transport *transport)
 {
 	struct helper_data *data = transport->data;
-	struct strbuf buf = STRBUF_INIT;
 	int res = 0;
 
 	if (data->helper) {
 		if (debug)
 			fprintf(stderr, "Debug: Disconnecting.\n");
 		if (!data->no_disconnect_req) {
-			strbuf_addf(&buf, "\n");
-			sendline(data, &buf);
+			/*
+			 * Ignore write errors; there's nothing we can do,
+			 * since we're about to close the pipe anyway. And the
+			 * most likely error is EPIPE due to the helper dying
+			 * to report an error itself.
+			 */
+			sigchain_push(SIGPIPE, SIG_IGN);
+			xwrite(data->helper->in, "\n", 1);
+			sigchain_pop(SIGPIPE);
 		}
 		close(data->helper->in);
 		close(data->helper->out);
@@ -391,7 +400,7 @@ static int get_exporter(struct transport *transport,
 	/* we need to duplicate helper->in because we want to use it after
 	 * fastexport is done with it. */
 	fastexport->out = dup(helper->in);
-	fastexport->argv = xcalloc(5 + revlist_args->nr, sizeof(*fastexport->argv));
+	fastexport->argv = xcalloc(6 + revlist_args->nr, sizeof(*fastexport->argv));
 	fastexport->argv[argc++] = "fast-export";
 	fastexport->argv[argc++] = "--use-done-feature";
 	if (data->export_marks)
@@ -402,8 +411,23 @@ static int get_exporter(struct transport *transport,
 	for (i = 0; i < revlist_args->nr; i++)
 		fastexport->argv[argc++] = revlist_args->items[i].string;
 
+	fastexport->argv[argc++] = "--";
+
 	fastexport->git_cmd = 1;
 	return start_command(fastexport);
+}
+
+static void check_helper_status(struct helper_data *data)
+{
+	int pid, status;
+
+	pid = waitpid(data->helper->pid, &status, WNOHANG);
+	if (pid < 0)
+		die("Could not retrieve status of remote helper '%s'",
+		    data->name);
+	if (pid > 0 && WIFEXITED(status))
+		die("Remote helper '%s' died with %d",
+		    data->name, WEXITSTATUS(status));
 }
 
 static int fetch_with_import(struct transport *transport,
@@ -434,6 +458,8 @@ static int fetch_with_import(struct transport *transport,
 
 	if (finish_command(&fastimport))
 		die("Error while running fast-import");
+	check_helper_status(data);
+
 	free(fastimport.argv);
 	fastimport.argv = NULL;
 
@@ -452,6 +478,12 @@ static int fetch_with_import(struct transport *transport,
 		}
 	}
 	strbuf_release(&buf);
+	if (auto_gc) {
+		const char *argv_gc_auto[] = {
+			"gc", "--auto", "--quiet", NULL,
+		};
+		run_command_v_opt(argv_gc_auto, RUN_GIT_CMD);
+	}
 	return 0;
 }
 
@@ -592,7 +624,7 @@ static void push_update_ref_status(struct strbuf *buf,
 		status = REF_STATUS_REMOTE_REJECT;
 		refname = buf->buf + 6;
 	} else
-		die("expected ok/error, helper said '%s'\n", buf->buf);
+		die("expected ok/error, helper said '%s'", buf->buf);
 
 	msg = strchr(refname, ' ');
 	if (msg) {
@@ -762,6 +794,7 @@ static int push_refs_with_export(struct transport *transport,
 
 	if (finish_command(&exporter))
 		die("Error while running fast-export");
+	check_helper_status(data);
 	push_update_refs_status(data, remote_refs);
 	return 0;
 }

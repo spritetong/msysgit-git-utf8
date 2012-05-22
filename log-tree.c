@@ -629,10 +629,9 @@ void show_log(struct rev_info *opt)
 			 * graph info here.
 			 */
 			show_reflog_message(opt->reflog_info,
-				    opt->commit_format == CMIT_FMT_ONELINE,
-				    opt->date_mode_explicit ?
-					opt->date_mode :
-					DATE_NORMAL);
+					    opt->commit_format == CMIT_FMT_ONELINE,
+					    opt->date_mode,
+					    opt->date_mode_explicit);
 			if (opt->commit_format == CMIT_FMT_ONELINE)
 				return;
 		}
@@ -652,6 +651,7 @@ void show_log(struct rev_info *opt)
 	if (ctx.need_8bit_cte >= 0)
 		ctx.need_8bit_cte = has_non_ascii(opt->add_signoff);
 	ctx.date_mode = opt->date_mode;
+	ctx.date_mode_explicit = opt->date_mode_explicit;
 	ctx.abbrev = opt->diffopt.abbrev;
 	ctx.after_subject = extra_headers;
 	ctx.preserve_subject = opt->preserve_subject;
@@ -683,7 +683,7 @@ void show_log(struct rev_info *opt)
 	if (opt->use_terminator) {
 		if (!opt->missing_newline)
 			graph_show_padding(opt->graph);
-		putchar('\n');
+		putchar(opt->diffopt.line_termination);
 	}
 
 	strbuf_release(&msgbuf);
@@ -712,13 +712,14 @@ int log_tree_diff_flush(struct rev_info *opt)
 		    opt->verbose_header &&
 		    opt->commit_format != CMIT_FMT_ONELINE) {
 			int pch = DIFF_FORMAT_DIFFSTAT | DIFF_FORMAT_PATCH;
-			if ((pch & opt->diffopt.output_format) == pch)
-				printf("---");
 			if (opt->diffopt.output_prefix) {
 				struct strbuf *msg = NULL;
 				msg = opt->diffopt.output_prefix(&opt->diffopt,
 					opt->diffopt.output_prefix_data);
 				fwrite(msg->buf, msg->len, 1, stdout);
+			}
+			if ((pch & opt->diffopt.output_format) == pch) {
+				printf("---");
 			}
 			putchar('\n');
 		}

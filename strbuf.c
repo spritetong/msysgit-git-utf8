@@ -383,6 +383,22 @@ int strbuf_getline(struct strbuf *sb, FILE *fp, int term)
 	return 0;
 }
 
+int strbuf_getwholeline_fd(struct strbuf *sb, int fd, int term)
+{
+	strbuf_reset(sb);
+
+	while (1) {
+		char ch;
+		ssize_t len = xread(fd, &ch, 1);
+		if (len <= 0)
+			return EOF;
+		strbuf_addch(sb, ch);
+		if (ch == term)
+			break;
+	}
+	return 0;
+}
+
 int strbuf_read_file(struct strbuf *sb, const char *path, size_t hint)
 {
 	int fd, len;
@@ -447,4 +463,37 @@ void strbuf_addstr_urlencode(struct strbuf *sb, const char *s,
 			     int reserved)
 {
 	strbuf_add_urlencode(sb, s, strlen(s), reserved);
+}
+
+void strbuf_addf_ln(struct strbuf *sb, const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	strbuf_vaddf(sb, fmt, ap);
+	va_end(ap);
+	strbuf_addch(sb, '\n');
+}
+
+int printf_ln(const char *fmt, ...)
+{
+	int ret;
+	va_list ap;
+	va_start(ap, fmt);
+	ret = vprintf(fmt, ap);
+	va_end(ap);
+	if (ret < 0 || putchar('\n') == EOF)
+		return -1;
+	return ret + 1;
+}
+
+int fprintf_ln(FILE *fp, const char *fmt, ...)
+{
+	int ret;
+	va_list ap;
+	va_start(ap, fmt);
+	ret = vfprintf(fp, fmt, ap);
+	va_end(ap);
+	if (ret < 0 || putc('\n', fp) == EOF)
+		return -1;
+	return ret + 1;
 }

@@ -103,6 +103,25 @@ effect to your index in a row.
 	cherry-pick'ed commit, then a fast forward to this commit will
 	be performed.
 
+--allow-empty::
+	By default, cherry-picking an empty commit will fail,
+	indicating that an explicit invocation of `git commit
+	--allow-empty` is required. This option overrides that
+	behavior, allowing empty commits to be preserved automatically
+	in a cherry-pick. Note that when "--ff" is in effect, empty
+	commits that meet the "fast-forward" requirement will be kept
+	even without this option.  Note also, that use of this option only
+	keeps commits that were initially empty (i.e. the commit recorded the
+	same tree as its parent).  Commits which are made empty due to a
+	previous commit are dropped.  To force the inclusion of those commits
+	use `--keep-redundant-commits`.
+
+--keep-redundant-commits::
+	If a commit being cherry picked duplicates a commit already in the
+	current history, it will become empty.  By default these
+	redundant commits are ignored.  This option overrides that behavior and
+	creates an empty commit object.  Implies `--allow-empty`.
+
 --strategy=<strategy>::
 	Use the given merge strategy.  Should only be used once.
 	See the MERGE STRATEGIES section in linkgit:git-merge[1]
@@ -130,7 +149,7 @@ EXAMPLES
 	Apply the changes introduced by all commits that are ancestors
 	of master but not of HEAD to produce new commits.
 
-`git cherry-pick master{tilde}4 master{tilde}2`::
+`git cherry-pick master~4 master~2`::
 
 	Apply the changes introduced by the fifth and third last
 	commits pointed to by master and create 2 new commits with
@@ -151,7 +170,7 @@ EXAMPLES
 	are in next but not HEAD to the current branch, creating a new
 	commit for each new change.
 
-`git rev-list --reverse master \-- README | git cherry-pick -n --stdin`::
+`git rev-list --reverse master -- README | git cherry-pick -n --stdin`::
 
 	Apply the changes introduced by all commits on the master
 	branch that touched README to the working tree and index,

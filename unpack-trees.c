@@ -102,21 +102,28 @@ void setup_unpack_trees_porcelain(struct unpack_trees_options *opts,
 		opts->unpack_rejects[i].strdup_strings = 1;
 }
 
+static void do_add_entry(struct unpack_trees_options *o, struct cache_entry *ce,
+			 unsigned int set, unsigned int clear)
+{
+	clear |= CE_HASHED | CE_UNHASHED;
+
+	if (set & CE_REMOVE)
+		set |= CE_WT_REMOVE;
+
+	ce->next = NULL;
+	ce->ce_flags = (ce->ce_flags & ~clear) | set;
+	add_index_entry(&o->result, ce,
+			ADD_CACHE_OK_TO_ADD | ADD_CACHE_OK_TO_REPLACE);
+}
+
 static void add_entry(struct unpack_trees_options *o, struct cache_entry *ce,
 	unsigned int set, unsigned int clear)
 {
 	unsigned int size = ce_size(ce);
 	struct cache_entry *new = xmalloc(size);
 
-	clear |= CE_HASHED | CE_UNHASHED;
-
-	if (set & CE_REMOVE)
-		set |= CE_WT_REMOVE;
-
 	memcpy(new, ce, size);
-	new->next = NULL;
-	new->ce_flags = (new->ce_flags & ~clear) | set;
-	add_index_entry(&o->result, new, ADD_CACHE_OK_TO_ADD|ADD_CACHE_OK_TO_REPLACE);
+	do_add_entry(o, new, set, clear);
 }
 
 /*
@@ -587,7 +594,7 @@ static int unpack_nondirectories(int n, unsigned long mask,
 
 	for (i = 0; i < n; i++)
 		if (src[i] && src[i] != o->df_conflict_entry)
-			add_entry(o, src[i], 0, 0);
+			do_add_entry(o, src[i], 0, 0);
 	return 0;
 }
 
@@ -772,7 +779,7 @@ static int unpack_callback(int n, unsigned long mask, unsigned long dirmask, str
 	if (unpack_nondirectories(n, mask, dirmask, src, names, info) < 0)
 		return -1;
 
-	if (src[0]) {
+	if (o->merge && src[0]) {
 		if (ce_stage(src[0]))
 			mark_ce_used_same_name(src[0], o);
 		else
@@ -1020,6 +1027,7 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 	o->result.initialized = 1;
 	o->result.timestamp.sec = o->src_index->timestamp.sec;
 	o->result.timestamp.nsec = o->src_index->timestamp.nsec;
+	o->result.version = o->src_index->version;
 	o->merge_size = len;
 	mark_all_ce_unused(o->src_index);
 
@@ -1785,7 +1793,7 @@ int bind_merge(struct cache_entry **src,
 	struct cache_entry *a = src[1];
 
 	if (o->merge_size != 1)
-		return error("Cannot do a bind merge of %d trees\n",
+		return error("Cannot do a bind merge of %d trees",
 			     o->merge_size);
 	if (a && old)
 		return o->gently ? -1 :

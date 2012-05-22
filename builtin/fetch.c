@@ -30,7 +30,7 @@ enum {
 };
 
 static int all, append, dry_run, force, keep, multiple, prune, update_head_ok, verbosity;
-static int progress, recurse_submodules = RECURSE_SUBMODULES_DEFAULT;
+static int progress = -1, recurse_submodules = RECURSE_SUBMODULES_DEFAULT;
 static int tags = TAGS_DEFAULT;
 static const char *depth;
 static const char *upload_pack;
@@ -78,7 +78,7 @@ static struct option builtin_fetch_options[] = {
 	OPT_BOOLEAN('k', "keep", &keep, "keep downloaded pack"),
 	OPT_BOOLEAN('u', "update-head-ok", &update_head_ok,
 		    "allow updating of HEAD ref"),
-	OPT_BOOLEAN(0, "progress", &progress, "force progress reporting"),
+	OPT_BOOL(0, "progress", &progress, "force progress reporting"),
 	OPT_STRING(0, "depth", &depth, "depth",
 		   "deepen history of shallow clone"),
 	{ OPTION_STRING, 0, "submodule-prefix", &submodule_prefix, "dir",
@@ -240,6 +240,7 @@ static int s_update_ref(const char *action,
 
 static int update_local_ref(struct ref *ref,
 			    const char *remote,
+			    const struct ref *remote_ref,
 			    struct strbuf *display)
 {
 	struct commit *current = NULL, *updated;
@@ -293,18 +294,26 @@ static int update_local_ref(struct ref *ref,
 		const char *msg;
 		const char *what;
 		int r;
-		if (!strncmp(ref->name, "refs/tags/", 10)) {
+		/*
+		 * Nicely describe the new ref we're fetching.
+		 * Base this on the remote's ref name, as it's
+		 * more likely to follow a standard layout.
+		 */
+		const char *name = remote_ref ? remote_ref->name : "";
+		if (!prefixcmp(name, "refs/tags/")) {
 			msg = "storing tag";
 			what = _("[new tag]");
-		}
-		else {
+		} else if (!prefixcmp(name, "refs/heads/")) {
 			msg = "storing head";
 			what = _("[new branch]");
-			if ((recurse_submodules != RECURSE_SUBMODULES_OFF) &&
-			    (recurse_submodules != RECURSE_SUBMODULES_ON))
-				check_for_new_submodule_commits(ref->new_sha1);
+		} else {
+			msg = "storing ref";
+			what = _("[new ref]");
 		}
 
+		if ((recurse_submodules != RECURSE_SUBMODULES_OFF) &&
+		    (recurse_submodules != RECURSE_SUBMODULES_ON))
+			check_for_new_submodule_commits(ref->new_sha1);
 		r = s_update_ref(msg, ref, 0);
 		strbuf_addf(display, "%c %-*s %-*s -> %s%s",
 			    r ? '!' : '*',
@@ -466,7 +475,7 @@ static int store_updated_refs(const char *raw_url, const char *remote_name,
 
 			strbuf_reset(&note);
 			if (ref) {
-				rc |= update_local_ref(ref, what, &note);
+				rc |= update_local_ref(ref, what, rm, &note);
 				free(ref);
 			} else
 				strbuf_addf(&note, "* %-*s %-*s -> FETCH_HEAD",
@@ -537,8 +546,8 @@ static int prune_refs(struct refspec *refs, int ref_count, struct ref *ref_map)
 	int result = 0;
 	struct ref *ref, *stale_refs = get_stale_heads(refs, ref_count, ref_map);
 	const char *dangling_msg = dry_run
-		? _("   (%s will become dangling)\n")
-		: _("   (%s has become dangling)\n");
+		? _("   (%s will become dangling)")
+		: _("   (%s has become dangling)");
 
 	for (ref = stale_refs; ref; ref = ref->next) {
 		if (!dry_run)

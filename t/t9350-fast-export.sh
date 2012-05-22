@@ -86,7 +86,7 @@ test_expect_success 'import/export-marks' '
 	git checkout -b marks master &&
 	git fast-export --export-marks=tmp-marks HEAD &&
 	test -s tmp-marks &&
-	test $(wc -l < tmp-marks) -eq 3 &&
+	test_line_count = 3 tmp-marks &&
 	test $(
 		git fast-export --import-marks=tmp-marks\
 		--export-marks=tmp-marks HEAD |
@@ -101,7 +101,7 @@ test_expect_success 'import/export-marks' '
 		grep ^commit\  |
 		wc -l) \
 	-eq 1 &&
-	test $(wc -l < tmp-marks) -eq 4
+	test_line_count = 4 tmp-marks
 
 '
 
@@ -438,6 +438,17 @@ test_expect_success 'fast-export quotes pathnames' '
 	 git rev-list HEAD >actual &&
 	 test_cmp ../expect actual
 	)
+'
+
+cat > expected << EOF
+reset refs/heads/master
+from $(git rev-parse master)
+
+EOF
+
+test_expect_success 'refs are updated even if no commits need to be exported' '
+	git fast-export master..master > actual &&
+	test_cmp expected actual
 '
 
 test_done

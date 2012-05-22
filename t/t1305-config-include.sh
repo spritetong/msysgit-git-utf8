@@ -5,7 +5,7 @@ test_description='test config file include directives'
 
 test_expect_success 'include file by absolute path' '
 	echo "[test]one = 1" >one &&
-	echo "[include]path = \"$PWD/one\"" >.gitconfig &&
+	echo "[include]path = \"$(pwd)/one\"" >.gitconfig &&
 	echo 1 >expect &&
 	git config test.one >actual &&
 	test_cmp expect actual
@@ -26,6 +26,14 @@ test_expect_success 'chained relative paths' '
 	echo "[include]path = subdir/two" >.gitconfig &&
 	echo 3 >expect &&
 	git config test.three >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'include paths get tilde-expansion' '
+	echo "[test]one = 1" >one &&
+	echo "[include]path = ~/one" >.gitconfig &&
+	echo 1 >expect &&
+	git config test.one >actual &&
 	test_cmp expect actual
 '
 
@@ -56,6 +64,14 @@ test_expect_success 'single file lookup does not expand includes by default' '
 	test_must_fail git config --global test.one &&
 	echo 1 >expect &&
 	git config --includes -f .gitconfig test.one >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'single file list does not expand includes by default' '
+	echo "[test]one = 1" >one &&
+	echo "[include]path = one" >.gitconfig &&
+	echo "include.path=one" >expect &&
+	git config -f .gitconfig --list >actual &&
 	test_cmp expect actual
 '
 

@@ -1641,6 +1641,8 @@ static int tree_content_get(
 		n = slash1 - p;
 	else
 		n = strlen(p);
+	if (!n)
+		die("Empty path component found in input");
 
 	if (!root->tree)
 		load_tree(root);
@@ -2205,6 +2207,59 @@ static uintmax_t change_note_fanout(struct tree_entry *root,
 	return do_change_note_fanout(root, root, hex_sha1, 0, path, 0, fanout);
 }
 
+/*
+ * Given a pointer into a string, parse a mark reference:
+ *
+ *   idnum ::= ':' bigint;
+ *
+ * Return the first character after the value in *endptr.
+ *
+ * Complain if the following character is not what is expected,
+ * either a space or end of the string.
+ */
+static uintmax_t parse_mark_ref(const char *p, char **endptr)
+{
+	uintmax_t mark;
+
+	assert(*p == ':');
+	p++;
+	mark = strtoumax(p, endptr, 10);
+	if (*endptr == p)
+		die("No value after ':' in mark: %s", command_buf.buf);
+	return mark;
+}
+
+/*
+ * Parse the mark reference, and complain if this is not the end of
+ * the string.
+ */
+static uintmax_t parse_mark_ref_eol(const char *p)
+{
+	char *end;
+	uintmax_t mark;
+
+	mark = parse_mark_ref(p, &end);
+	if (*end != '\0')
+		die("Garbage after mark: %s", command_buf.buf);
+	return mark;
+}
+
+/*
+ * Parse the mark reference, demanding a trailing space.  Return a
+ * pointer to the space.
+ */
+static uintmax_t parse_mark_ref_space(const char **p)
+{
+	uintmax_t mark;
+	char *end;
+
+	mark = parse_mark_ref(*p, &end);
+	if (*end != ' ')
+		die("Missing space after mark: %s", command_buf.buf);
+	*p = end;
+	return mark;
+}
+
 static void file_change_m(struct branch *b)
 {
 	const char *p = command_buf.buf + 2;
@@ -2233,21 +2288,21 @@ static void file_change_m(struct branch *b)
 	}
 
 	if (*p == ':') {
-		char *x;
-		oe = find_mark(strtoumax(p + 1, &x, 10));
+		oe = find_mark(parse_mark_ref_space(&p));
 		hashcpy(sha1, oe->idx.sha1);
-		p = x;
-	} else if (!prefixcmp(p, "inline")) {
+	} else if (!prefixcmp(p, "inline ")) {
 		inline_data = 1;
-		p += 6;
+		p += strlen("inline");  /* advance to space */
 	} else {
 		if (get_sha1_hex(p, sha1))
-			die("Invalid SHA1: %s", command_buf.buf);
+			die("Invalid dataref: %s", command_buf.buf);
 		oe = find_object(sha1);
 		p += 40;
+		if (*p != ' ')
+			die("Missing space after SHA1: %s", command_buf.buf);
 	}
-	if (*p++ != ' ')
-		die("Missing space after SHA1: %s", command_buf.buf);
+	assert(*p == ' ');
+	p++;  /* skip space */
 
 	strbuf_reset(&uq);
 	if (!unquote_c_style(&uq, p, &endp)) {
@@ -2405,21 +2460,21 @@ static void note_change_n(struct branch *b, unsigned char *old_fanout)
 	/* Now parse the notemodify command. */
 	/* <dataref> or 'inline' */
 	if (*p == ':') {
-		char *x;
-		oe = find_mark(strtoumax(p + 1, &x, 10));
+		oe = find_mark(parse_mark_ref_space(&p));
 		hashcpy(sha1, oe->idx.sha1);
-		p = x;
-	} else if (!prefixcmp(p, "inline")) {
+	} else if (!prefixcmp(p, "inline ")) {
 		inline_data = 1;
-		p += 6;
+		p += strlen("inline");  /* advance to space */
 	} else {
 		if (get_sha1_hex(p, sha1))
-			die("Invalid SHA1: %s", command_buf.buf);
+			die("Invalid dataref: %s", command_buf.buf);
 		oe = find_object(sha1);
 		p += 40;
+		if (*p != ' ')
+			die("Missing space after SHA1: %s", command_buf.buf);
 	}
-	if (*p++ != ' ')
-		die("Missing space after SHA1: %s", command_buf.buf);
+	assert(*p == ' ');
+	p++;  /* skip space */
 
 	/* <committish> */
 	s = lookup_branch(p);
@@ -2428,7 +2483,7 @@ static void note_change_n(struct branch *b, unsigned char *old_fanout)
 			die("Can't add a note on empty branch.");
 		hashcpy(commit_sha1, s->sha1);
 	} else if (*p == ':') {
-		uintmax_t commit_mark = strtoumax(p + 1, NULL, 10);
+		uintmax_t commit_mark = parse_mark_ref_eol(p);
 		struct object_entry *commit_oe = find_mark(commit_mark);
 		if (commit_oe->type != OBJ_COMMIT)
 			die("Mark :%" PRIuMAX " not a commit", commit_mark);
@@ -2535,7 +2590,7 @@ static int parse_from(struct branch *b)
 		hashcpy(b->branch_tree.versions[0].sha1, t);
 		hashcpy(b->branch_tree.versions[1].sha1, t);
 	} else if (*from == ':') {
-		uintmax_t idnum = strtoumax(from + 1, NULL, 10);
+		uintmax_t idnum = parse_mark_ref_eol(from);
 		struct object_entry *oe = find_mark(idnum);
 		if (oe->type != OBJ_COMMIT)
 			die("Mark :%" PRIuMAX " not a commit", idnum);
@@ -2570,7 +2625,7 @@ static struct hash_list *parse_merge(unsigned int *count)
 		if (s)
 			hashcpy(n->sha1, s->sha1);
 		else if (*from == ':') {
-			uintmax_t idnum = strtoumax(from + 1, NULL, 10);
+			uintmax_t idnum = parse_mark_ref_eol(from);
 			struct object_entry *oe = find_mark(idnum);
 			if (oe->type != OBJ_COMMIT)
 				die("Mark :%" PRIuMAX " not a commit", idnum);
@@ -2712,7 +2767,7 @@ static void parse_new_tag(void)
 	/* Obtain the new tag name from the rest of our command */
 	sp = strchr(command_buf.buf, ' ') + 1;
 	t = pool_alloc(sizeof(struct tag));
-	t->next_tag = NULL;
+	memset(t, 0, sizeof(struct tag));
 	t->name = pool_strdup(sp);
 	if (last_tag)
 		last_tag->next_tag = t;
@@ -2733,7 +2788,7 @@ static void parse_new_tag(void)
 		type = OBJ_COMMIT;
 	} else if (*from == ':') {
 		struct object_entry *oe;
-		from_mark = strtoumax(from + 1, NULL, 10);
+		from_mark = parse_mark_ref_eol(from);
 		oe = find_mark(from_mark);
 		type = oe->type;
 		hashcpy(sha1, oe->idx.sha1);
@@ -2865,18 +2920,13 @@ static void parse_cat_blob(void)
 	/* cat-blob SP <object> LF */
 	p = command_buf.buf + strlen("cat-blob ");
 	if (*p == ':') {
-		char *x;
-		oe = find_mark(strtoumax(p + 1, &x, 10));
-		if (x == p + 1)
-			die("Invalid mark: %s", command_buf.buf);
+		oe = find_mark(parse_mark_ref_eol(p));
 		if (!oe)
 			die("Unknown mark: %s", command_buf.buf);
-		if (*x)
-			die("Garbage after mark: %s", command_buf.buf);
 		hashcpy(sha1, oe->idx.sha1);
 	} else {
 		if (get_sha1_hex(p, sha1))
-			die("Invalid SHA1: %s", command_buf.buf);
+			die("Invalid dataref: %s", command_buf.buf);
 		if (p[40])
 			die("Garbage after SHA1: %s", command_buf.buf);
 		oe = find_object(sha1);
@@ -2942,17 +2992,13 @@ static struct object_entry *parse_treeish_dataref(const char **p)
 	struct object_entry *e;
 
 	if (**p == ':') {	/* <mark> */
-		char *endptr;
-		e = find_mark(strtoumax(*p + 1, &endptr, 10));
-		if (endptr == *p + 1)
-			die("Invalid mark: %s", command_buf.buf);
+		e = find_mark(parse_mark_ref_space(p));
 		if (!e)
 			die("Unknown mark: %s", command_buf.buf);
-		*p = endptr;
 		hashcpy(sha1, e->idx.sha1);
 	} else {	/* <sha1> */
 		if (get_sha1_hex(*p, sha1))
-			die("Invalid SHA1: %s", command_buf.buf);
+			die("Invalid dataref: %s", command_buf.buf);
 		e = find_object(sha1);
 		*p += 40;
 	}
@@ -3028,6 +3074,8 @@ static void parse_ls(struct branch *b)
 		store_tree(&leaf);
 
 	print_ls(leaf.versions[1].mode, leaf.versions[1].sha1, p);
+	if (leaf.tree)
+		release_tree_content_recursive(leaf.tree);
 	if (!b || root != &b->branch_tree)
 		release_tree_entry(root);
 }

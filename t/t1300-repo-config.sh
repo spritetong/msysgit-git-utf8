@@ -451,11 +451,19 @@ test_expect_success 'refer config from subdirectory' '
 	mkdir x &&
 	(
 		cd x &&
-		echo strasse >expect
+		echo strasse >expect &&
 		git config --get --file ../other-config ein.bahn >actual &&
 		test_cmp expect actual
 	)
 
+'
+
+test_expect_success 'refer config from subdirectory via GIT_CONFIG' '
+	(
+		cd x &&
+		GIT_CONFIG=../other-config git config --get ein.bahn >actual &&
+		test_cmp expect actual
+	)
 '
 
 cat > expect << EOF
@@ -541,6 +549,14 @@ weird
 EOF
 
 test_expect_success "rename succeeded" "test_cmp expect .git/config"
+
+test_expect_success 'renaming empty section name is rejected' '
+	test_must_fail git config --rename-section branch.zwei ""
+'
+
+test_expect_success 'renaming to bogus section is rejected' '
+	test_must_fail git config --rename-section branch.zwei "bogus name"
+'
 
 cat >> .git/config << EOF
   [branch "zwei"] a = 1 [branch "vier"]
@@ -958,6 +974,54 @@ test_expect_success 'git -c complains about empty key' '
 
 test_expect_success 'git -c complains about empty key and value' '
 	test_must_fail git -c "" rev-parse
+'
+
+test_expect_success 'git config --edit works' '
+	git config -f tmp test.value no &&
+	echo test.value=yes >expect &&
+	GIT_EDITOR="echo [test]value=yes >" git config -f tmp --edit &&
+	git config -f tmp --list >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'git config --edit respects core.editor' '
+	git config -f tmp test.value no &&
+	echo test.value=yes >expect &&
+	test_config core.editor "echo [test]value=yes >" &&
+	git config -f tmp --edit &&
+	git config -f tmp --list >actual &&
+	test_cmp expect actual
+'
+
+# malformed configuration files
+test_expect_success 'barf on syntax error' '
+	cat >.git/config <<-\EOF &&
+	# broken section line
+	[section]
+	key garbage
+	EOF
+	test_must_fail git config --get section.key >actual 2>error &&
+	grep " line 3 " error
+'
+
+test_expect_success 'barf on incomplete section header' '
+	cat >.git/config <<-\EOF &&
+	# broken section line
+	[section
+	key = value
+	EOF
+	test_must_fail git config --get section.key >actual 2>error &&
+	grep " line 2 " error
+'
+
+test_expect_success 'barf on incomplete string' '
+	cat >.git/config <<-\EOF &&
+	# broken section line
+	[section]
+	key = "value string
+	EOF
+	test_must_fail git config --get section.key >actual 2>error &&
+	grep " line 3 " error
 '
 
 test_done

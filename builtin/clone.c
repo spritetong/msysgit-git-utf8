@@ -45,7 +45,7 @@ static char *option_branch = NULL;
 static const char *real_git_dir;
 static char *option_upload_pack = "git-upload-pack";
 static int option_verbosity;
-static int option_progress;
+static int option_progress = -1;
 static struct string_list option_config;
 static struct string_list option_reference;
 
@@ -60,8 +60,8 @@ static int opt_parse_reference(const struct option *opt, const char *arg, int un
 
 static struct option builtin_clone_options[] = {
 	OPT__VERBOSITY(&option_verbosity),
-	OPT_BOOLEAN(0, "progress", &option_progress,
-			"force progress reporting"),
+	OPT_BOOL(0, "progress", &option_progress,
+		 "force progress reporting"),
 	OPT_BOOLEAN('n', "no-checkout", &option_no_checkout,
 		    "don't create a checkout"),
 	OPT_BOOLEAN(0, "bare", &option_bare, "create a bare repository"),
@@ -569,7 +569,7 @@ static int checkout(void)
 	opts.update = 1;
 	opts.merge = 1;
 	opts.fn = oneway_merge;
-	opts.verbose_update = (option_verbosity > 0);
+	opts.verbose_update = (option_verbosity >= 0);
 	opts.src_index = &the_index;
 	opts.dst_index = &the_index;
 
@@ -821,7 +821,9 @@ int cmd_clone(int argc, const char **argv, const char *prefix)
 			}
 
 		if (!is_local && !complete_refs_before_fetch)
-			transport_fetch_refs(transport, mapped_refs);
+			if (transport_fetch_refs(transport, mapped_refs))
+				die(_("could not fetch refs from %s"),
+				    transport->url);
 
 		remote_head = find_ref_by_name(refs, "HEAD");
 		remote_head_points_at =

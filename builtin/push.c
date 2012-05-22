@@ -19,11 +19,12 @@ static int thin;
 static int deleterefs;
 static const char *receivepack;
 static int verbosity;
-static int progress;
+static int progress = -1;
 
 static const char **refspec;
 static int refspec_nr;
 static int refspec_alloc;
+static int default_matching_used;
 
 static void add_refspec(const char *ref)
 {
@@ -65,7 +66,54 @@ static void set_refspecs(const char **refs, int nr)
 	}
 }
 
-static void setup_push_upstream(struct remote *remote)
+static int push_url_of_remote(struct remote *remote, const char ***url_p)
+{
+	if (remote->pushurl_nr) {
+		*url_p = remote->pushurl;
+		return remote->pushurl_nr;
+	}
+	*url_p = remote->url;
+	return remote->url_nr;
+}
+
+static NORETURN int die_push_simple(struct branch *branch, struct remote *remote) {
+	/*
+	 * There's no point in using shorten_unambiguous_ref here,
+	 * as the ambiguity would be on the remote side, not what
+	 * we have locally. Plus, this is supposed to be the simple
+	 * mode. If the user is doing something crazy like setting
+	 * upstream to a non-branch, we should probably be showing
+	 * them the big ugly fully qualified ref.
+	 */
+	const char *advice_maybe = "";
+	const char *short_upstream =
+		skip_prefix(branch->merge[0]->src, "refs/heads/");
+
+	if (!short_upstream)
+		short_upstream = branch->merge[0]->src;
+	/*
+	 * Don't show advice for people who explicitely set
+	 * push.default.
+	 */
+	if (push_default == PUSH_DEFAULT_UNSPECIFIED)
+		advice_maybe = _("\n"
+				 "To choose either option permanently, "
+				 "see push.default in 'git help config'.");
+	die(_("The upstream branch of your current branch does not match\n"
+	      "the name of your current branch.  To push to the upstream branch\n"
+	      "on the remote, use\n"
+	      "\n"
+	      "    git push %s HEAD:%s\n"
+	      "\n"
+	      "To push to the branch of the same name on the remote, use\n"
+	      "\n"
+	      "    git push %s %s\n"
+	      "%s"),
+	    remote->name, short_upstream,
+	    remote->name, branch->name, advice_maybe);
+}
+
+static void setup_push_upstream(struct remote *remote, int simple)
 {
 	struct strbuf refspec = STRBUF_INIT;
 	struct branch *branch = branch_get(NULL);
@@ -76,7 +124,7 @@ static void setup_push_upstream(struct remote *remote)
 		    "\n"
 		    "    git push %s HEAD:<name-of-remote-branch>\n"),
 		    remote->name);
-	if (!branch->merge_nr || !branch->merge)
+	if (!branch->merge_nr || !branch->merge || !branch->remote_name)
 		die(_("The current branch %s has no upstream branch.\n"
 		    "To push the current branch and set the remote as upstream, use\n"
 		    "\n"
@@ -87,6 +135,14 @@ static void setup_push_upstream(struct remote *remote)
 	if (branch->merge_nr != 1)
 		die(_("The current branch %s has multiple upstream branches, "
 		    "refusing to push."), branch->name);
+	if (strcmp(branch->remote_name, remote->name))
+		die(_("You are pushing to remote '%s', which is not the upstream of\n"
+		      "your current branch '%s', without telling me what to push\n"
+		      "to update which remote branch."),
+		    remote->name, branch->name);
+	if (simple && strcmp(branch->refname, branch->merge[0]->src))
+		die_push_simple(branch, remote);
+
 	strbuf_addf(&refspec, "%s:%s", branch->name, branch->merge[0]->src);
 	add_refspec(refspec.buf);
 }
@@ -95,12 +151,19 @@ static void setup_default_push_refspecs(struct remote *remote)
 {
 	switch (push_default) {
 	default:
+	case PUSH_DEFAULT_UNSPECIFIED:
+		default_matching_used = 1;
+		/* fallthru */
 	case PUSH_DEFAULT_MATCHING:
 		add_refspec(":");
 		break;
 
+	case PUSH_DEFAULT_SIMPLE:
+		setup_push_upstream(remote, 1);
+		break;
+
 	case PUSH_DEFAULT_UPSTREAM:
-		setup_push_upstream(remote);
+		setup_push_upstream(remote, 0);
 		break;
 
 	case PUSH_DEFAULT_CURRENT:
@@ -112,6 +175,45 @@ static void setup_default_push_refspecs(struct remote *remote)
 		    "push.default is \"nothing\"."));
 		break;
 	}
+}
+
+static const char message_advice_pull_before_push[] =
+	N_("Updates were rejected because the tip of your current branch is behind\n"
+	   "its remote counterpart. Merge the remote changes (e.g. 'git pull')\n"
+	   "before pushing again.\n"
+	   "See the 'Note about fast-forwards' in 'git push --help' for details.");
+
+static const char message_advice_use_upstream[] =
+	N_("Updates were rejected because a pushed branch tip is behind its remote\n"
+	   "counterpart. If you did not intend to push that branch, you may want to\n"
+	   "specify branches to push or set the 'push.default' configuration\n"
+	   "variable to 'current' or 'upstream' to push only the current branch.");
+
+static const char message_advice_checkout_pull_push[] =
+	N_("Updates were rejected because a pushed branch tip is behind its remote\n"
+	   "counterpart. Check out this branch and merge the remote changes\n"
+	   "(e.g. 'git pull') before pushing again.\n"
+	   "See the 'Note about fast-forwards' in 'git push --help' for details.");
+
+static void advise_pull_before_push(void)
+{
+	if (!advice_push_non_ff_current || !advice_push_nonfastforward)
+		return;
+	advise(_(message_advice_pull_before_push));
+}
+
+static void advise_use_upstream(void)
+{
+	if (!advice_push_non_ff_default || !advice_push_nonfastforward)
+		return;
+	advise(_(message_advice_use_upstream));
+}
+
+static void advise_checkout_pull_push(void)
+{
+	if (!advice_push_non_ff_matching || !advice_push_nonfastforward)
+		return;
+	advise(_(message_advice_checkout_pull_push));
 }
 
 static int push_with_options(struct transport *transport, int flags)
@@ -135,14 +237,21 @@ static int push_with_options(struct transport *transport, int flags)
 		error(_("failed to push some refs to '%s'"), transport->url);
 
 	err |= transport_disconnect(transport);
-
 	if (!err)
 		return 0;
 
-	if (nonfastforward && advice_push_nonfastforward) {
-		fprintf(stderr, _("To prevent you from losing history, non-fast-forward updates were rejected\n"
-				"Merge the remote changes (e.g. 'git pull') before pushing again.  See the\n"
-				"'Note about fast-forwards' section of 'git push --help' for details.\n"));
+	switch (nonfastforward) {
+	default:
+		break;
+	case NON_FF_HEAD:
+		advise_pull_before_push();
+		break;
+	case NON_FF_OTHER:
+		if (default_matching_used)
+			advise_use_upstream();
+		else
+			advise_checkout_pull_push();
+		break;
 	}
 
 	return 1;
@@ -196,13 +305,7 @@ static int do_push(const char *repo, int flags)
 			setup_default_push_refspecs(remote);
 	}
 	errs = 0;
-	if (remote->pushurl_nr) {
-		url = remote->pushurl;
-		url_nr = remote->pushurl_nr;
-	} else {
-		url = remote->url;
-		url_nr = remote->url_nr;
-	}
+	url_nr = push_url_of_remote(remote, &url);
 	if (url_nr) {
 		for (i = 0; i < url_nr; i++) {
 			struct transport *transport =
@@ -224,13 +327,21 @@ static int option_parse_recurse_submodules(const struct option *opt,
 				   const char *arg, int unset)
 {
 	int *flags = opt->value;
+
+	if (*flags & (TRANSPORT_RECURSE_SUBMODULES_CHECK |
+		      TRANSPORT_RECURSE_SUBMODULES_ON_DEMAND))
+		die("%s can only be used once.", opt->long_name);
+
 	if (arg) {
 		if (!strcmp(arg, "check"))
 			*flags |= TRANSPORT_RECURSE_SUBMODULES_CHECK;
+		else if (!strcmp(arg, "on-demand"))
+			*flags |= TRANSPORT_RECURSE_SUBMODULES_ON_DEMAND;
 		else
 			die("bad %s argument: %s", opt->long_name, arg);
 	} else
-		die("option %s needs an argument (check)", opt->long_name);
+		die("option %s needs an argument (check|on-demand)",
+				opt->long_name);
 
 	return 0;
 }
@@ -260,7 +371,9 @@ int cmd_push(int argc, const char **argv, const char *prefix)
 		OPT_STRING( 0 , "exec", &receivepack, "receive-pack", "receive pack program"),
 		OPT_BIT('u', "set-upstream", &flags, "set upstream for git pull/status",
 			TRANSPORT_PUSH_SET_UPSTREAM),
-		OPT_BOOLEAN(0, "progress", &progress, "force progress reporting"),
+		OPT_BOOL(0, "progress", &progress, "force progress reporting"),
+		OPT_BIT(0, "prune", &flags, "prune locally removed refs",
+			TRANSPORT_PUSH_PRUNE),
 		OPT_END()
 	};
 

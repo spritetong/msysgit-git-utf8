@@ -24,6 +24,7 @@ ignore-space-change pass it through git-apply
 ignore-whitespace pass it through git-apply
 directory=      pass it through git-apply
 exclude=        pass it through git-apply
+include=        pass it through git-apply
 C=              pass it through git-apply
 p=              pass it through git-apply
 patch-format=   format the patch(es) are in
@@ -128,15 +129,24 @@ fall_back_3way () {
     mkdir "$dotest/patch-merge-tmp-dir"
 
     # First see if the patch records the index info that we can use.
-    git apply --build-fake-ancestor "$dotest/patch-merge-tmp-index" \
-	"$dotest/patch" &&
+    cmd="git apply $git_apply_opt --build-fake-ancestor" &&
+    cmd="$cmd "'"$dotest/patch-merge-tmp-index" "$dotest/patch"' &&
+    eval "$cmd" &&
     GIT_INDEX_FILE="$dotest/patch-merge-tmp-index" \
     git write-tree >"$dotest/patch-merge-base+" ||
     cannot_fallback "$(gettext "Repository lacks necessary blobs to fall back on 3-way merge.")"
 
     say Using index info to reconstruct a base tree...
-    if GIT_INDEX_FILE="$dotest/patch-merge-tmp-index" \
-	git apply --cached <"$dotest/patch"
+
+    cmd='GIT_INDEX_FILE="$dotest/patch-merge-tmp-index"'
+
+    if test -z "$GIT_QUIET"
+    then
+	eval "$cmd git diff-index --cached --diff-filter=AM --name-status HEAD"
+    fi
+
+    cmd="$cmd git apply --cached $git_apply_opt"' <"$dotest/patch"'
+    if eval "$cmd"
     then
 	mv "$dotest/patch-merge-base+" "$dotest/patch-merge-base"
 	mv "$dotest/patch-merge-tmp-index" "$dotest/patch-merge-index"
@@ -173,7 +183,9 @@ It does not apply to blobs recorded in its index.")"
 }
 
 clean_abort () {
-	test $# = 0 || echo >&2 "$@"
+	test $# = 0 || cat >&2 <<EOF
+$@
+EOF
 	rm -fr "$dotest"
 	exit 1
 }
@@ -202,7 +214,7 @@ check_patch_format () {
 		l1=
 		while test -z "$l1"
 		do
-			read l1
+			read l1 || break
 		done
 		read l2
 		read l3
@@ -377,7 +389,9 @@ do
 	-i|--interactive)
 		interactive=t ;;
 	-b|--binary)
-		: ;;
+		echo >&2 "The $1 option has been a no-op for long time, and"
+		echo >&2 "it will be removed. Please do not use it anymore."
+		;;
 	-3|--3way)
 		threeway=t ;;
 	-s|--signoff)
@@ -407,7 +421,7 @@ do
 		;;
 	--resolvemsg)
 		shift; resolvemsg=$1 ;;
-	--whitespace|--directory|--exclude)
+	--whitespace|--directory|--exclude|--include)
 		git_apply_opt="$git_apply_opt $(sq "$1=$2")"; shift ;;
 	-C|-p)
 		git_apply_opt="$git_apply_opt $(sq "$1$2")"; shift ;;
