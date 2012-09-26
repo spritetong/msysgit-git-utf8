@@ -167,6 +167,7 @@ run_specific_rebase () {
 	if [ "$interactive_rebase" = implied ]; then
 		GIT_EDITOR=:
 		export GIT_EDITOR
+		autosquash=
 	fi
 	. git-rebase--$type
 }
@@ -423,7 +424,7 @@ case "$onto_name" in
 	;;
 *)
 	onto=$(git rev-parse --verify "${onto_name}^0") ||
-	die "Does not point to a valid commit: $1"
+	die "Does not point to a valid commit: $onto_name"
 	;;
 esac
 

@@ -18,10 +18,13 @@ UI, Workflows & Features
 
  * A third-party tool "git subtree" is distributed in contrib/
 
- * Error messages given when @{u} is used for a branch without its
-   upstream configured have been clatified.
+ * A remote helper that acts as a proxy and caches ssl session for the
+   https:// transport is added to the contrib/ area.
 
- * Even with "-q"uiet option, "checkout" used to report setting up
+ * Error messages given when @{u} is used for a branch without its
+   upstream configured have been clarified.
+
+ * Even with the "-q"uiet option, "checkout" used to report setting up
    tracking.  Also "branch" learned the "-q"uiet option to squelch
    informational message.
 
@@ -37,8 +40,8 @@ UI, Workflows & Features
  * "git am" learned the "--include" option, which is an opposite of
    existing the "--exclude" option.
 
- * When "git am -3" needs to fall back to an application to a
-   synthesized preimage followed by a 3-way merge, the paths that
+ * When "git am -3" needs to fall back to an application of the patch
+   to a synthesized preimage followed by a 3-way merge, the paths that
    needed such treatment are now reported to the end user, so that the
    result in them can be eyeballed with extra care.
 
@@ -50,8 +53,9 @@ UI, Workflows & Features
    after populating two temporary directories, instead of running an
    instance of the external tool once per a file pair.
 
- * The "fmt-merge-msg" command learns to list the primary contributors
-   involved in the side topic you are merging.
+ * The "fmt-merge-msg" command learned to list the primary contributors
+   involved in the side topic you are merging in a comment in the merge
+   commit template.
 
  * "git rebase" learned to optionally keep commits that do not
    introduce any change in the original history.
@@ -67,17 +71,20 @@ UI, Workflows & Features
 
 Foreign Interface
 
- * "git svn" used to die with unwanted SIGPIPE when talking with HTTP
+ * "git svn" used to die with unwanted SIGPIPE when talking with an HTTP
    server that uses keep-alive.
 
  * "git svn" learned to use platform specific authentication
    providers, e.g. gnome-keyring, kwallet, etc.
 
- * "git p4" has been moved out of contrib/ area and has seen more work
-   on importing labels as tags from (and exporting tags as labels to)
-   p4.
+ * "git p4" has been moved out of the contrib/ area and has seen more
+   work on importing labels as tags from (and exporting tags as labels
+   to) p4.
 
 Performance and Internal Implementation (please report possible regressions)
+
+ * Bash completion script (in contrib/) have been cleaned up to make
+   future work on it simpler.
 
  * An experimental "version 4" format of the index file has been
    introduced to reduce on-disk footprint and I/O overhead.
@@ -103,12 +110,15 @@ Performance and Internal Implementation (please report possible regressions)
  * More lower-level commands learned to use the streaming API to read
    from the object store without keeping everything in core.
 
+ * The weighting parameters to suggestion command name typo have been
+   tweaked, so that "git tags" will suggest "tag?" and not "stage?".
+
  * Because "sh" on the user's PATH may be utterly broken on some
    systems, run-command API now uses SHELL_PATH, not /bin/sh, when
    spawning an external command (not applicable to Windows port).
 
- * The API to iterate over refs/ hierarchy has been tweaked to allow
-   walking only a subset of it more efficiently.
+ * The API to iterate over the refs/ hierarchy has been tweaked to
+   allow walking only a subset of it more efficiently.
 
 Also contains minor documentation updates and code clean-ups.
 
@@ -120,10 +130,9 @@ Unless otherwise noted, all the fixes since v1.7.10 in the maintenance
 releases are contained in this release (see release notes to them for
 details).
 
- * "git status --porcelain" ignored "--branch" option by mistake.  The
-   output for "git status --branch -z" was also incorrect and did not
-   terminate the record for the current branch name with NUL as asked.
-   (merge d4a6bf1 jk/maint-status-porcelain-z-b later to maint).
+ * "git submodule init" used to report "registered for path ..."
+   even for submodules that were registered earlier.
+   (cherry-pick c1c259e jl/submodule-report-new-path-once later to maint).
 
  * "git diff --stat" used to fully count a binary file with modified
    execution bits whose contents is unmodified, which was not quite

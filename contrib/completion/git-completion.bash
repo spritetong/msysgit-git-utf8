@@ -853,6 +853,8 @@ __git_list_porcelain_commands ()
 		checkout-index)   : plumbing;;
 		commit-tree)      : plumbing;;
 		count-objects)    : infrequent;;
+		credential-cache) : credentials helper;;
+		credential-store) : credentials helper;;
 		cvsexportcommit)  : export;;
 		cvsimport)        : import;;
 		cvsserver)        : daemon;;
@@ -2604,7 +2606,7 @@ _git_whatchanged ()
 	_git_log
 }
 
-_git ()
+__git_main ()
 {
 	local i c=1 command __git_dir
 
@@ -2655,7 +2657,7 @@ _git ()
 	fi
 }
 
-_gitk ()
+__gitk_main ()
 {
 	__git_has_doubledash && return
 
@@ -2707,13 +2709,25 @@ __git_complete ()
 		|| complete -o default -o nospace -F $wrapper $1
 }
 
-__git_complete git _git
-__git_complete gitk _gitk
+# wrapper for backwards compatibility
+_git ()
+{
+	__git_wrap__git_main
+}
+
+# wrapper for backwards compatibility
+_gitk ()
+{
+	__git_wrap__gitk_main
+}
+
+__git_complete git __git_main
+__git_complete gitk __gitk_main
 
 # The following are necessary only for Cygwin, and only are needed
 # when the user has tab-completed the executable name and consequently
 # included the '.exe' suffix.
 #
 if [ Cygwin = "$(uname -o 2>/dev/null)" ]; then
-__git_complete git.exe _git
+__git_complete git.exe __git_main
 fi

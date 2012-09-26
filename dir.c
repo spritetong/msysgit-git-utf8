@@ -74,7 +74,6 @@ char *common_prefix(const char **pathspec)
 
 int fill_directory(struct dir_struct *dir, const char **pathspec)
 {
-	const char *path;
 	size_t len;
 
 	/*
@@ -82,15 +81,9 @@ int fill_directory(struct dir_struct *dir, const char **pathspec)
 	 * use that to optimize the directory walk
 	 */
 	len = common_prefix_len(pathspec);
-	path = "";
-
-	if (len)
-		path = xmemdupz(*pathspec, len);
 
 	/* Read the directory and prune it */
-	read_directory(dir, path, len, pathspec);
-	if (*path)
-		free((char *)path);
+	read_directory(dir, pathspec ? *pathspec : "", len, pathspec);
 	return len;
 }
 
@@ -560,7 +553,7 @@ int excluded_from_list(const char *pathname,
 	return -1; /* undecided */
 }
 
-int excluded(struct dir_struct *dir, const char *pathname, int *dtype_p)
+static int excluded(struct dir_struct *dir, const char *pathname, int *dtype_p)
 {
 	int pathlen = strlen(pathname);
 	int st;
@@ -578,6 +571,64 @@ int excluded(struct dir_struct *dir, const char *pathname, int *dtype_p)
 		}
 	}
 	return 0;
+}
+
+void path_exclude_check_init(struct path_exclude_check *check,
+			     struct dir_struct *dir)
+{
+	check->dir = dir;
+	strbuf_init(&check->path, 256);
+}
+
+void path_exclude_check_clear(struct path_exclude_check *check)
+{
+	strbuf_release(&check->path);
+}
+
+/*
+ * Is this name excluded?  This is for a caller like show_files() that
+ * do not honor directory hierarchy and iterate through paths that are
+ * possibly in an ignored directory.
+ *
+ * A path to a directory known to be excluded is left in check->path to
+ * optimize for repeated checks for files in the same excluded directory.
+ */
+int path_excluded(struct path_exclude_check *check,
+		  const char *name, int namelen, int *dtype)
+{
+	int i;
+	struct strbuf *path = &check->path;
+
+	/*
+	 * we allow the caller to pass namelen as an optimization; it
+	 * must match the length of the name, as we eventually call
+	 * excluded() on the whole name string.
+	 */
+	if (namelen < 0)
+		namelen = strlen(name);
+
+	if (path->len &&
+	    path->len <= namelen &&
+	    !memcmp(name, path->buf, path->len) &&
+	    (!name[path->len] || name[path->len] == '/'))
+		return 1;
+
+	strbuf_setlen(path, 0);
+	for (i = 0; name[i]; i++) {
+		int ch = name[i];
+
+		if (ch == '/') {
+			int dt = DT_DIR;
+			if (excluded(check->dir, path->buf, &dt))
+				return 1;
+		}
+		strbuf_addch(path, ch);
+	}
+
+	/* An entry in the index; cannot be a directory with subentries */
+	strbuf_setlen(path, 0);
+
+	return excluded(check->dir, name, dtype);
 }
 
 static struct dir_entry *dir_entry_new(const char *pathname, int len)
@@ -960,15 +1011,16 @@ static int read_directory_recursive(struct dir_struct *dir,
 				    int check_only,
 				    const struct path_simplify *simplify)
 {
-	DIR *fdir = opendir(*base ? base : ".");
+	DIR *fdir;
 	int contents = 0;
 	struct dirent *de;
 	struct strbuf path = STRBUF_INIT;
 
-	if (!fdir)
-		return 0;
-
 	strbuf_add(&path, base, baselen);
+
+	fdir = opendir(path.len ? path.buf : ".");
+	if (!fdir)
+		goto out;
 
 	while ((de = readdir(fdir)) != NULL) {
 		switch (treat_path(dir, de, &path, baselen, simplify)) {
@@ -984,12 +1036,11 @@ static int read_directory_recursive(struct dir_struct *dir,
 		}
 		contents++;
 		if (check_only)
-			goto exit_early;
-		else
-			dir_add_name(dir, path.buf, path.len);
+			break;
+		dir_add_name(dir, path.buf, path.len);
 	}
-exit_early:
 	closedir(fdir);
+ out:
 	strbuf_release(&path);
 
 	return contents;

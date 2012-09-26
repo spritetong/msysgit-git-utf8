@@ -89,6 +89,7 @@
 #define WIN32_LEAN_AND_MEAN  /* stops windows.h including winsock.h */
 #include <winsock2.h>
 #include <windows.h>
+#include <conio.h>
 #endif
 
 #include <unistd.h>
@@ -599,6 +600,9 @@ int rmdir_or_warn(const char *path);
  * the supplied file mode.
  */
 int remove_or_warn(unsigned int mode, const char *path);
+
+/* Get the passwd entry for the UID of the current process. */
+struct passwd *xgetpwuid_self(void);
 
 #ifndef mark_as_git_dir
 #define mark_as_git_dir(x) /* noop */

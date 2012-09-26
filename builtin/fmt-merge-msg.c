@@ -230,7 +230,7 @@ static void add_branch_desc(struct strbuf *out, const char *name)
 static void record_person(int which, struct string_list *people,
 			  struct commit *commit)
 {
-	char name_buf[MAX_GITNAME], *name, *name_end;
+	char *name_buf, *name, *name_end;
 	struct string_list_item *elem;
 	const char *field = (which == 'a') ? "\nauthor " : "\ncommitter ";
 
@@ -243,10 +243,9 @@ static void record_person(int which, struct string_list *people,
 		name_end--;
 	while (isspace(*name_end) && name <= name_end)
 		name_end--;
-	if (name_end < name || name + MAX_GITNAME <= name_end)
+	if (name_end < name)
 		return;
-	memcpy(name_buf, name, name_end - name + 1);
-	name_buf[name_end - name + 1] = '\0';
+	name_buf = xmemdupz(name, name_end - name + 1);
 
 	elem = string_list_lookup(people, name_buf);
 	if (!elem) {
@@ -254,6 +253,7 @@ static void record_person(int which, struct string_list *people,
 		elem->util = (void *)0;
 	}
 	elem->util = (void*)(util_as_integral(elem) + 1);
+	free(name_buf);
 }
 
 static int cmp_string_list_util_as_integral(const void *a_, const void *b_)
@@ -286,10 +286,10 @@ static void credit_people(struct strbuf *out,
 	const char *me;
 
 	if (kind == 'a') {
-		label = "\nBy ";
+		label = "\n# By ";
 		me = git_author_info(IDENT_NO_DATE);
 	} else {
-		label = "\nvia ";
+		label = "\n# Via ";
 		me = git_committer_info(IDENT_NO_DATE);
 	}
 
@@ -462,7 +462,10 @@ static void fmt_tag_signature(struct strbuf *tagbuf,
 		strbuf_add(tagbuf, tag_body, buf + len - tag_body);
 	}
 	strbuf_complete_line(tagbuf);
-	strbuf_add_lines(tagbuf, "# ", sig->buf, sig->len);
+	if (sig->len) {
+		strbuf_addch(tagbuf, '\n');
+		strbuf_add_lines(tagbuf, "# ", sig->buf, sig->len);
+	}
 }
 
 static void fmt_merge_msg_sigs(struct strbuf *out)
@@ -627,8 +630,7 @@ int fmt_merge_msg(struct strbuf *in, struct strbuf *out,
 		rev.ignore_merges = 1;
 		rev.limited = 1;
 
-		if (suffixcmp(out->buf, "\n"))
-			strbuf_addch(out, '\n');
+		strbuf_complete_line(out);
 
 		for (i = 0; i < origins.nr; i++)
 			shortlog(origins.items[i].string,

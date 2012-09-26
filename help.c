@@ -6,6 +6,7 @@
 #include "common-cmds.h"
 #include "string-list.h"
 #include "column.h"
+#include "version.h"
 
 void add_cmdname(struct cmdnames *cmds, const char *name, int len)
 {
@@ -102,10 +103,19 @@ static int is_executable(const char *name)
 		return 0;
 
 #if defined(WIN32) || defined(__CYGWIN__)
+	/* On Windows we cannot use the executable bit. The executable
+	 * state is determined by extension only. We do this first
+	 * because with virus scanners opening an executeable for
+	 * reading is potentially expensive.
+	 */
+	if (has_extension(name, ".exe"))
+		return S_IXUSR;
+
 #if defined(__CYGWIN__)
 if ((st.st_mode & S_IXUSR) == 0)
 #endif
-{	/* cannot trust the executable bit, peek into the file instead */
+{	/* now that we know it does not have an executable extension,
+	   peek into the file instead */
 	char buf[3] = { 0 };
 	int n;
 	int fd = open(name, O_RDONLY);
@@ -113,8 +123,8 @@ if ((st.st_mode & S_IXUSR) == 0)
 	if (fd >= 0) {
 		n = read(fd, buf, 2);
 		if (n == 2)
-			/* DOS executables start with "MZ" */
-			if (!strcmp(buf, "#!") || !strcmp(buf, "MZ"))
+			/* look for a she-bang */
+			if (!strcmp(buf, "#!"))
 				st.st_mode |= S_IXUSR;
 		close(fd);
 	}
@@ -317,7 +327,7 @@ const char *help_unknown_cmd(const char *cmd)
 		}
 
 		main_cmds.names[i]->len =
-			levenshtein(cmd, candidate, 0, 2, 1, 4) + 1;
+			levenshtein(cmd, candidate, 0, 2, 1, 3) + 1;
 	}
 
 	qsort(main_cmds.names, main_cmds.cnt,
