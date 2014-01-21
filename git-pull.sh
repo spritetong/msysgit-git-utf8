@@ -4,8 +4,8 @@
 #
 # Fetch one or more remote refs and merge it/them into the current HEAD.
 
-USAGE='[-n | --no-stat] [--[no-]commit] [--[no-]squash] [--[no-]ff] [-s strategy]... [<fetch-options>] <repo> <head>...'
-LONG_USAGE='Fetch one or more remote refs and merge it/them into the current HEAD.'
+USAGE='[-n | --no-stat] [--[no-]commit] [--[no-]squash] [--[no-]ff] [--[no-]rebase|--rebase=preserve] [-s strategy]... [<fetch-options>] <repo> <head>...'
+LONG_USAGE='Fetch one or more remote refs and integrate it/them with the current HEAD.'
 SUBDIRECTORY_OK=Yes
 OPTIONS_SPEC=
 . git-sh-setup
@@ -38,24 +38,19 @@ Please, commit your changes before you can merge.")"
 test -z "$(git ls-files -u)" || die_conflict
 test -f "$GIT_DIR/MERGE_HEAD" && die_merge
 
+bool_or_string_config () {
+	git config --bool "$1" 2>/dev/null || git config "$1"
+}
+
 strategy_args= diffstat= no_commit= squash= no_ff= ff_only=
-log_arg= verbosity= progress= recurse_submodules=
-merge_args= edit=
+log_arg= verbosity= progress= recurse_submodules= verify_signatures=
+merge_args= edit= rebase_args=
 curr_branch=$(git symbolic-ref -q HEAD)
 curr_branch_short="${curr_branch#refs/heads/}"
-rebase_options=
-case "$(git config branch.$curr_branch_short.rebase)" in
-interactive)
-	rebase_options=-i
-	rebase=true
-	;;
-*)
-	rebase=$(git config --bool branch.$curr_branch_short.rebase)
-	;;
-esac
+rebase=$(bool_or_string_config branch.$curr_branch_short.rebase)
 if test -z "$rebase"
 then
-	rebase=$(git config --bool pull.rebase)
+	rebase=$(bool_or_string_config pull.rebase)
 fi
 dry_run=
 while :
@@ -119,16 +114,15 @@ do
 		esac
 		merge_args="$merge_args$xx "
 		;;
+	-r=*|--r=*|--re=*|--reb=*|--reba=*|--rebas=*|--rebase=*)
+		rebase="${1#*=}"
+		;;
 	-r|--r|--re|--reb|--reba|--rebas|--rebase)
 		rebase=true
 		;;
-	--rebase=i|--rebase=interactive)
-		rebase_options=-i
-		rebase=true
-		;;
 	--no-r|--no-re|--no-reb|--no-reba|--no-rebas|--no-rebase)
-		rebase_options=
 		rebase=false
+
 		;;
 	--recurse-submodules)
 		recurse_submodules=--recurse-submodules
@@ -138,6 +132,12 @@ do
 		;;
 	--no-recurse-submodules)
 		recurse_submodules=--no-recurse-submodules
+		;;
+	--verify-signatures)
+		verify_signatures=--verify-signatures
+		;;
+	--no-verify-signatures)
+		verify_signatures=--no-verify-signatures
 		;;
 	--d|--dr|--dry|--dry-|--dry-r|--dry-ru|--dry-run)
 		dry_run=--dry-run
@@ -152,6 +152,24 @@ do
 	esac
 	shift
 done
+
+case "$rebase" in
+i|interactive)
+	rebase=true
+	rebase_args=-i
+	;;
+preserve)
+	rebase=true
+	rebase_args=--preserve-merges
+	;;
+true|false|'')
+	;;
+*)
+	echo "Invalid value for --rebase, should be true, false, interactive or preserve"
+	usage
+	exit 1
+	;;
+esac
 
 error_on_no_merge_candidates () {
 	exec >&2
@@ -174,9 +192,8 @@ error_on_no_merge_candidates () {
 		op_prep=with
 	fi
 
-	curr_branch=${curr_branch#refs/heads/}
-	upstream=$(git config "branch.$curr_branch.merge")
-	remote=$(git config "branch.$curr_branch.remote")
+	upstream=$(git config "branch.$curr_branch_short.merge")
+	remote=$(git config "branch.$curr_branch_short.remote")
 
 	if [ $# -gt 1 ]; then
 		if [ "$rebase" = true ]; then
@@ -214,6 +231,7 @@ test true = "$rebase" && {
 		require_clean_work_tree "pull with rebase" "Please commit or stash them."
 	fi
 	oldremoteref= &&
+	test -n "$curr_branch" &&
 	. git-parse-remote &&
 	remoteref="$(get_remote_merge_branch "$@" 2>/dev/null)" &&
 	oldremoteref="$(git rev-parse -q --verify "$remoteref")" &&
@@ -273,10 +291,17 @@ case "$merge_head" in
 	;;
 esac
 
+# Pulling into unborn branch: a shorthand for branching off
+# FETCH_HEAD, for lazy typers.
 if test -z "$orig_head"
 then
-	git update-ref -m "initial pull" HEAD $merge_head "$curr_head" &&
-	git read-tree -m -u HEAD || exit 1
+	# Two-way merge: we claim the index is based on an empty tree,
+	# and try to fast-forward to HEAD.  This ensures we will not
+	# lose index/worktree changes that the user already made on
+	# the unborn branch.
+	empty_tree=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+	git read-tree -m -u $empty_tree $merge_head &&
+	git update-ref -m "initial pull" HEAD $merge_head "$curr_head"
 	exit
 fi
 
@@ -292,11 +317,11 @@ fi
 merge_name=$(git fmt-merge-msg $log_arg <"$GIT_DIR/FETCH_HEAD") || exit
 case "$rebase" in
 true)
-	eval="git-rebase $rebase_options $diffstat $strategy_args $merge_args"
+	eval="git-rebase $diffstat $strategy_args $merge_args $rebase_args $verbosity"
 	eval="$eval --onto $merge_head ${oldremoteref:-$merge_head}"
 	;;
 *)
-	eval="git-merge $diffstat $no_commit $edit $squash $no_ff $ff_only"
+	eval="git-merge $diffstat $no_commit $verify_signatures $edit $squash $no_ff $ff_only"
 	eval="$eval  $log_arg $strategy_args $merge_args $verbosity $progress"
 	eval="$eval \"\$merge_name\" HEAD $merge_head"
 	;;

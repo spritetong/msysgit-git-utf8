@@ -5,15 +5,11 @@ test_description='test cherry-picking many commits'
 . ./test-lib.sh
 
 check_head_differs_from() {
-	head=$(git rev-parse --verify HEAD) &&
-	arg=$(git rev-parse --verify "$1") &&
-	test "$head" != "$arg"
+	! test_cmp_rev HEAD "$1"
 }
 
 check_head_equals() {
-	head=$(git rev-parse --verify HEAD) &&
-	arg=$(git rev-parse --verify "$1") &&
-	test "$head" = "$arg"
+	test_cmp_rev HEAD "$1"
 }
 
 test_expect_success setup '
@@ -42,6 +38,27 @@ test_expect_success 'cherry-pick first..fourth works' '
 	git diff --quiet other &&
 	git diff --quiet HEAD other &&
 	check_head_differs_from fourth
+'
+
+test_expect_success 'cherry-pick three one two works' '
+	git checkout -f first &&
+	test_commit one &&
+	test_commit two &&
+	test_commit three &&
+	git checkout -f master &&
+	git reset --hard first &&
+	git cherry-pick three one two &&
+	git diff --quiet three &&
+	git diff --quiet HEAD three &&
+	test "$(git log --reverse --format=%s first..)" = "three
+one
+two"
+'
+
+test_expect_success 'cherry-pick three one two: fails' '
+	git checkout -f master &&
+	git reset --hard first &&
+	test_must_fail git cherry-pick three one two:
 '
 
 test_expect_success 'output to keep user entertained during multi-pick' '

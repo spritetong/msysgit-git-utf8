@@ -383,7 +383,7 @@ static int is_date(int year, int month, int day, struct tm *now_tm, time_t now, 
 		 * sense to specify timestamp way into the future.  Make
 		 * sure it is not later than ten days from now...
 		 */
-		if (now + 10*24*3600 < specified)
+		if ((specified != -1) && (now + 10*24*3600 < specified))
 			return 0;
 		tm->tm_mon = r->tm_mon;
 		tm->tm_mday = r->tm_mday;
@@ -624,7 +624,7 @@ static int match_object_header_date(const char *date, unsigned long *timestamp, 
 	unsigned long stamp;
 	int ofs;
 
-	if (*date < '0' || '9' <= *date)
+	if (*date < '0' || '9' < *date)
 		return -1;
 	stamp = strtoul(date, &end, 10);
 	if (*end != ' ' || stamp == ULONG_MAX || (end[1] != '+' && end[1] != '-'))
@@ -694,8 +694,14 @@ int parse_date_basic(const char *date, unsigned long *timestamp, int *offset)
 
 	/* mktime uses local timezone */
 	*timestamp = tm_to_time_t(&tm);
-	if (*offset == -1)
-		*offset = ((time_t)*timestamp - mktime(&tm)) / 60;
+	if (*offset == -1) {
+		time_t temp_time = mktime(&tm);
+		if ((time_t)*timestamp > temp_time) {
+			*offset = ((time_t)*timestamp - temp_time) / 60;
+		} else {
+			*offset = -(int)((temp_time - (time_t)*timestamp) / 60);
+		}
+	}
 
 	if (*timestamp == -1)
 		return -1;
@@ -703,6 +709,28 @@ int parse_date_basic(const char *date, unsigned long *timestamp, int *offset)
 	if (!tm_gmt)
 		*timestamp -= *offset * 60;
 	return 0; /* success */
+}
+
+int parse_expiry_date(const char *date, unsigned long *timestamp)
+{
+	int errors = 0;
+
+	if (!strcmp(date, "never") || !strcmp(date, "false"))
+		*timestamp = 0;
+	else if (!strcmp(date, "all") || !strcmp(date, "now"))
+		/*
+		 * We take over "now" here, which usually translates
+		 * to the current timestamp.  This is because the user
+		 * really means to expire everything she has done in
+		 * the past, and by definition reflogs are the record
+		 * of the past, and there is nothing from the future
+		 * to be kept.
+		 */
+		*timestamp = ULONG_MAX;
+	else
+		*timestamp = approxidate_careful(date, &errors);
+
+	return errors;
 }
 
 int parse_date(const char *date, char *result, int maxlen)
@@ -879,7 +907,7 @@ static const char *approxidate_alpha(const char *date, struct tm *tm, struct tm 
 	const char *end = date;
 	int i;
 
-	while (isalpha(*++end));
+	while (isalpha(*++end))
 		;
 
 	for (i = 0; i < 12; i++) {

@@ -8,6 +8,7 @@ LIB_GIT_DAEMON_PORT=${LIB_GIT_DAEMON_PORT-5570}
 start_git_daemon
 
 test_expect_success 'setup repository' '
+	git config push.default matching &&
 	echo content >file &&
 	git add file &&
 	git commit -m one
@@ -36,7 +37,7 @@ test_expect_success 'fetch changes via git protocol' '
 	test_cmp file clone/file
 '
 
-test_expect_failure 'remote detects correct HEAD' '
+test_expect_success 'remote detects correct HEAD' '
 	git push public master:other &&
 	(cd clone &&
 	 git remote set-head -d origin &&
@@ -121,8 +122,7 @@ test_remote_error()
 	fi
 
 	test_must_fail git "$cmd" "$GIT_DAEMON_URL/$repo" "$@" 2>output &&
-	echo "fatal: remote error: $msg: /$repo" >expect &&
-	test_cmp expect output
+	test_i18ngrep "fatal: remote error: $msg: /$repo" output &&
 	ret=$?
 	chmod +x "$GIT_DAEMON_DOCUMENT_ROOT_PATH/repo.git"
 	(exit $ret)

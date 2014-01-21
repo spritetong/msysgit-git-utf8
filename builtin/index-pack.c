@@ -9,6 +9,7 @@
 #include "progress.h"
 #include "fsck.h"
 #include "exec_cmd.h"
+#include "streaming.h"
 #include "thread-utils.h"
 
 static const char index_pack_usage[] =
@@ -39,8 +40,8 @@ struct base_data {
 	int ofs_first, ofs_last;
 };
 
-#if !defined(NO_PTHREADS) && defined(NO_PREAD)
-/* NO_PREAD uses compat/pread.c, which is not thread-safe. Disable threading. */
+#if !defined(NO_PTHREADS) && defined(NO_THREAD_SAFE_PREAD)
+/* pread() emulation is not thread-safe. Disable threading. */
 #define NO_PTHREADS
 #endif
 
@@ -76,7 +77,10 @@ static int nr_threads;
 
 static int from_stdin;
 static int strict;
+static int do_fsck_object;
 static int verbose;
+static int show_stat;
+static int check_self_contained_and_connected;
 
 static struct progress *progress;
 
@@ -107,6 +111,10 @@ static pthread_mutex_t work_mutex;
 #define work_lock()		lock_mutex(&work_mutex)
 #define work_unlock()		unlock_mutex(&work_mutex)
 
+static pthread_mutex_t deepest_delta_mutex;
+#define deepest_delta_lock()	lock_mutex(&deepest_delta_mutex)
+#define deepest_delta_unlock()	unlock_mutex(&deepest_delta_mutex)
+
 static pthread_key_t key;
 
 static inline void lock_mutex(pthread_mutex_t *mutex)
@@ -129,6 +137,8 @@ static void init_thread(void)
 	init_recursive_mutex(&read_mutex);
 	pthread_mutex_init(&counter_mutex, NULL);
 	pthread_mutex_init(&work_mutex, NULL);
+	if (show_stat)
+		pthread_mutex_init(&deepest_delta_mutex, NULL);
 	pthread_key_create(&key, NULL);
 	thread_data = xcalloc(nr_threads, sizeof(*thread_data));
 	threads_active = 1;
@@ -142,6 +152,8 @@ static void cleanup_thread(void)
 	pthread_mutex_destroy(&read_mutex);
 	pthread_mutex_destroy(&counter_mutex);
 	pthread_mutex_destroy(&work_mutex);
+	if (show_stat)
+		pthread_mutex_destroy(&deepest_delta_mutex);
 	pthread_key_delete(key);
 	free(thread_data);
 }
@@ -156,6 +168,9 @@ static void cleanup_thread(void)
 
 #define work_lock()
 #define work_unlock()
+
+#define deepest_delta_lock()
+#define deepest_delta_unlock()
 
 #endif
 
@@ -174,13 +189,13 @@ static int mark_link(struct object *obj, int type, void *data)
 
 /* The content of each linked object must have been checked
    or it must be already present in the object database */
-static void check_object(struct object *obj)
+static unsigned check_object(struct object *obj)
 {
 	if (!obj)
-		return;
+		return 0;
 
 	if (!(obj->flags & FLAG_LINK))
-		return;
+		return 0;
 
 	if (!(obj->flags & FLAG_CHECKED)) {
 		unsigned long size;
@@ -188,17 +203,20 @@ static void check_object(struct object *obj)
 		if (type != obj->type || type <= 0)
 			die(_("object of unexpected type"));
 		obj->flags |= FLAG_CHECKED;
-		return;
+		return 1;
 	}
+
+	return 0;
 }
 
-static void check_objects(void)
+static unsigned check_objects(void)
 {
-	unsigned i, max;
+	unsigned i, max, foreign_nr = 0;
 
 	max = get_max_object_index();
 	for (i = 0; i < max; i++)
-		check_object(get_indexed_object(i));
+		foreign_nr += check_object(get_indexed_object(i));
+	return foreign_nr;
 }
 
 
@@ -290,7 +308,7 @@ static void parse_pack_header(void)
 	if (hdr->hdr_signature != htonl(PACK_SIGNATURE))
 		die(_("pack signature mismatch"));
 	if (!pack_version_ok(hdr->hdr_version))
-		die("pack version %"PRIu32" unsupported",
+		die(_("pack version %"PRIu32" unsupported"),
 			ntohl(hdr->hdr_version));
 
 	nr_objects = ntohl(hdr->hdr_entries);
@@ -384,30 +402,62 @@ static void unlink_base_data(struct base_data *c)
 	free_base_data(c);
 }
 
-static void *unpack_entry_data(unsigned long offset, unsigned long size)
+static int is_delta_type(enum object_type type)
 {
+	return (type == OBJ_REF_DELTA || type == OBJ_OFS_DELTA);
+}
+
+static void *unpack_entry_data(unsigned long offset, unsigned long size,
+			       enum object_type type, unsigned char *sha1)
+{
+	static char fixed_buf[8192];
 	int status;
 	git_zstream stream;
-	void *buf = xmalloc(size);
+	void *buf;
+	git_SHA_CTX c;
+	char hdr[32];
+	int hdrlen;
+
+	if (!is_delta_type(type)) {
+		hdrlen = sprintf(hdr, "%s %lu", typename(type), size) + 1;
+		git_SHA1_Init(&c);
+		git_SHA1_Update(&c, hdr, hdrlen);
+	} else
+		sha1 = NULL;
+	if (type == OBJ_BLOB && size > big_file_threshold)
+		buf = fixed_buf;
+	else
+		buf = xmalloc(size);
 
 	memset(&stream, 0, sizeof(stream));
 	git_inflate_init(&stream);
 	stream.next_out = buf;
-	stream.avail_out = size;
+	stream.avail_out = buf == fixed_buf ? sizeof(fixed_buf) : size;
 
 	do {
+		unsigned char *last_out = stream.next_out;
 		stream.next_in = fill(1);
 		stream.avail_in = input_len;
 		status = git_inflate(&stream, 0);
 		use(input_len - stream.avail_in);
+		if (sha1)
+			git_SHA1_Update(&c, last_out, stream.next_out - last_out);
+		if (buf == fixed_buf) {
+			stream.next_out = buf;
+			stream.avail_out = sizeof(fixed_buf);
+		}
 	} while (status == Z_OK);
 	if (stream.total_out != size || status != Z_STREAM_END)
 		bad_object(offset, _("inflate returned %d"), status);
 	git_inflate_end(&stream);
-	return buf;
+	if (sha1)
+		git_SHA1_Final(sha1, &c);
+	return buf == fixed_buf ? NULL : buf;
 }
 
-static void *unpack_raw_entry(struct object_entry *obj, union delta_base *delta_base)
+static void *unpack_raw_entry(struct object_entry *obj,
+			      union delta_base *delta_base,
+			      unsigned char *sha1)
 {
 	unsigned char *p;
 	unsigned long size, c;
@@ -467,12 +517,14 @@ static void *unpack_raw_entry(struct object_entry *obj, union delta_base *delta_
 	}
 	obj->hdr_size = consumed_bytes - obj->idx.offset;
 
-	data = unpack_entry_data(obj->idx.offset, obj->size);
+	data = unpack_entry_data(obj->idx.offset, obj->size, obj->type, sha1);
 	obj->idx.crc32 = input_crc32;
 	return data;
 }
 
-static void *get_data_from_pack(struct object_entry *obj)
+static void *unpack_data(struct object_entry *obj,
+			 int (*consume)(const unsigned char *, unsigned long, void *),
+			 void *cb_data)
 {
 	off_t from = obj[0].idx.offset + obj[0].hdr_size;
 	unsigned long len = obj[1].idx.offset - from;
@@ -480,13 +532,13 @@ static void *get_data_from_pack(struct object_entry *obj)
 	git_zstream stream;
 	int status;
 
-	data = xmalloc(obj->size);
+	data = xmalloc(consume ? 64*1024 : obj->size);
 	inbuf = xmalloc((len < 64*1024) ? len : 64*1024);
 
 	memset(&stream, 0, sizeof(stream));
 	git_inflate_init(&stream);
 	stream.next_out = data;
-	stream.avail_out = obj->size;
+	stream.avail_out = consume ? 64*1024 : obj->size;
 
 	do {
 		ssize_t n = (len < 64*1024) ? len : 64*1024;
@@ -502,7 +554,20 @@ static void *get_data_from_pack(struct object_entry *obj)
 		len -= n;
 		stream.next_in = inbuf;
 		stream.avail_in = n;
-		status = git_inflate(&stream, 0);
+		if (!consume)
+			status = git_inflate(&stream, 0);
+		else {
+			do {
+				status = git_inflate(&stream, 0);
+				if (consume(data, stream.next_out - data, cb_data)) {
+					free(inbuf);
+					free(data);
+					return NULL;
+				}
+				stream.next_out = data;
+				stream.avail_out = 64*1024;
+			} while (status == Z_OK && stream.avail_in);
+		}
 	} while (len && status == Z_OK && !stream.avail_in);
 
 	/* This has been inflated OK when first encountered, so... */
@@ -511,7 +576,16 @@ static void *get_data_from_pack(struct object_entry *obj)
 
 	git_inflate_end(&stream);
 	free(inbuf);
+	if (consume) {
+		free(data);
+		data = NULL;
+	}
 	return data;
+}
+
+static void *get_data_from_pack(struct object_entry *obj)
+{
+	return unpack_data(obj, NULL, NULL);
 }
 
 static int compare_delta_bases(const union delta_base *base1,
@@ -568,25 +642,102 @@ static void find_delta_children(const union delta_base *base,
 	*last_index = last;
 }
 
-static void sha1_object(const void *data, unsigned long size,
-			enum object_type type, unsigned char *sha1)
+struct compare_data {
+	struct object_entry *entry;
+	struct git_istream *st;
+	unsigned char *buf;
+	unsigned long buf_size;
+};
+
+static int compare_objects(const unsigned char *buf, unsigned long size,
+			   void *cb_data)
 {
-	hash_sha1_file(data, size, typename(type), sha1);
+	struct compare_data *data = cb_data;
+
+	if (data->buf_size < size) {
+		free(data->buf);
+		data->buf = xmalloc(size);
+		data->buf_size = size;
+	}
+
+	while (size) {
+		ssize_t len = read_istream(data->st, data->buf, size);
+		if (len == 0)
+			die(_("SHA1 COLLISION FOUND WITH %s !"),
+			    sha1_to_hex(data->entry->idx.sha1));
+		if (len < 0)
+			die(_("unable to read %s"),
+			    sha1_to_hex(data->entry->idx.sha1));
+		if (memcmp(buf, data->buf, len))
+			die(_("SHA1 COLLISION FOUND WITH %s !"),
+			    sha1_to_hex(data->entry->idx.sha1));
+		size -= len;
+		buf += len;
+	}
+	return 0;
+}
+
+static int check_collison(struct object_entry *entry)
+{
+	struct compare_data data;
+	enum object_type type;
+	unsigned long size;
+
+	if (entry->size <= big_file_threshold || entry->type != OBJ_BLOB)
+		return -1;
+
+	memset(&data, 0, sizeof(data));
+	data.entry = entry;
+	data.st = open_istream(entry->idx.sha1, &type, &size, NULL);
+	if (!data.st)
+		return -1;
+	if (size != entry->size || type != entry->type)
+		die(_("SHA1 COLLISION FOUND WITH %s !"),
+		    sha1_to_hex(entry->idx.sha1));
+	unpack_data(entry, compare_objects, &data);
+	close_istream(data.st);
+	free(data.buf);
+	return 0;
+}
+
+static void sha1_object(const void *data, struct object_entry *obj_entry,
+			unsigned long size, enum object_type type,
+			const unsigned char *sha1)
+{
+	void *new_data = NULL;
+	int collision_test_needed;
+
+	assert(data || obj_entry);
+
 	read_lock();
-	if (has_sha1_file(sha1)) {
+	collision_test_needed = has_sha1_file(sha1);
+	read_unlock();
+
+	if (collision_test_needed && !data) {
+		read_lock();
+		if (!check_collison(obj_entry))
+			collision_test_needed = 0;
+		read_unlock();
+	}
+	if (collision_test_needed) {
 		void *has_data;
 		enum object_type has_type;
 		unsigned long has_size;
+		read_lock();
+		has_type = sha1_object_info(sha1, &has_size);
+		if (has_type != type || has_size != size)
+			die(_("SHA1 COLLISION FOUND WITH %s !"), sha1_to_hex(sha1));
 		has_data = read_sha1_file(sha1, &has_type, &has_size);
 		read_unlock();
+		if (!data)
+			data = new_data = get_data_from_pack(obj_entry);
 		if (!has_data)
 			die(_("cannot read existing object %s"), sha1_to_hex(sha1));
 		if (size != has_size || type != has_type ||
 		    memcmp(data, has_data, size) != 0)
 			die(_("SHA1 COLLISION FOUND WITH %s !"), sha1_to_hex(sha1));
 		free(has_data);
-	} else
-		read_unlock();
+	}
 
 	if (strict) {
 		read_lock();
@@ -601,6 +752,8 @@ static void sha1_object(const void *data, unsigned long size,
 			int eaten;
 			void *buf = (void *) data;
 
+			assert(data && "data can only be NULL for large _blobs_");
+
 			/*
 			 * we do not need to free the memory here, as the
 			 * buf is deleted by the caller.
@@ -608,7 +761,8 @@ static void sha1_object(const void *data, unsigned long size,
 			obj = parse_object_buffer(sha1, type, size, buf, &eaten);
 			if (!obj)
 				die(_("invalid %s"), typename(type));
-			if (fsck_object(obj, 1, fsck_error_function))
+			if (do_fsck_object &&
+			    fsck_object(obj, 1, fsck_error_function))
 				die(_("Error in object"));
 			if (fsck_walk(obj, mark_link, NULL))
 				die(_("Not all child objects of %s are reachable"), sha1_to_hex(obj->sha1));
@@ -616,6 +770,7 @@ static void sha1_object(const void *data, unsigned long size,
 			if (obj->type == OBJ_TREE) {
 				struct tree *item = (struct tree *) obj;
 				item->buffer = NULL;
+				obj->parsed = 0;
 			}
 			if (obj->type == OBJ_COMMIT) {
 				struct commit *commit = (struct commit *) obj;
@@ -625,11 +780,8 @@ static void sha1_object(const void *data, unsigned long size,
 		}
 		read_unlock();
 	}
-}
 
-static int is_delta_type(enum object_type type)
-{
-	return (type == OBJ_REF_DELTA || type == OBJ_OFS_DELTA);
+	free(new_data);
 }
 
 /*
@@ -699,9 +851,13 @@ static void resolve_delta(struct object_entry *delta_obj,
 	void *base_data, *delta_data;
 
 	delta_obj->real_type = base->obj->real_type;
-	delta_obj->delta_depth = base->obj->delta_depth + 1;
-	if (deepest_delta < delta_obj->delta_depth)
-		deepest_delta = delta_obj->delta_depth;
+	if (show_stat) {
+		delta_obj->delta_depth = base->obj->delta_depth + 1;
+		deepest_delta_lock();
+		if (deepest_delta < delta_obj->delta_depth)
+			deepest_delta = delta_obj->delta_depth;
+		deepest_delta_unlock();
+	}
 	delta_obj->base_object_no = base->obj - objects;
 	delta_data = get_data_from_pack(delta_obj);
 	base_data = get_base_data(base);
@@ -711,7 +867,9 @@ static void resolve_delta(struct object_entry *delta_obj,
 	free(delta_data);
 	if (!result->data)
 		bad_object(delta_obj->idx.offset, _("failed to apply delta"));
-	sha1_object(result->data, result->size, delta_obj->real_type,
+	hash_sha1_file(result->data, result->size,
+		       typename(delta_obj->real_type), delta_obj->idx.sha1);
+	sha1_object(result->data, NULL, result->size, delta_obj->real_type,
 		    delta_obj->idx.sha1);
 	counter_lock();
 	nr_resolved_deltas++;
@@ -815,8 +973,10 @@ static void *threaded_second_pass(void *data)
 	set_thread_data(data);
 	for (;;) {
 		int i;
-		work_lock();
+		counter_lock();
 		display_progress(progress, nr_resolved_deltas);
+		counter_unlock();
+		work_lock();
 		while (nr_dispatched < nr_objects &&
 		       is_delta_type(objects[nr_dispatched].type))
 			nr_dispatched++;
@@ -841,7 +1001,7 @@ static void *threaded_second_pass(void *data)
  */
 static void parse_pack_objects(unsigned char *sha1)
 {
-	int i;
+	int i, nr_delays = 0;
 	struct delta_entry *delta = deltas;
 	struct stat st;
 
@@ -851,14 +1011,18 @@ static void parse_pack_objects(unsigned char *sha1)
 				nr_objects);
 	for (i = 0; i < nr_objects; i++) {
 		struct object_entry *obj = &objects[i];
-		void *data = unpack_raw_entry(obj, &delta->base);
+		void *data = unpack_raw_entry(obj, &delta->base, obj->idx.sha1);
 		obj->real_type = obj->type;
 		if (is_delta_type(obj->type)) {
 			nr_deltas++;
 			delta->obj_no = i;
 			delta++;
+		} else if (!data) {
+			/* large blobs, check later */
+			obj->real_type = OBJ_BAD;
+			nr_delays++;
 		} else
-			sha1_object(data, obj->size, obj->type, obj->idx.sha1);
+			sha1_object(data, NULL, obj->size, obj->type, obj->idx.sha1);
 		free(data);
 		display_progress(progress, i+1);
 	}
@@ -878,6 +1042,17 @@ static void parse_pack_objects(unsigned char *sha1)
 	if (S_ISREG(st.st_mode) &&
 			lseek(input_fd, 0, SEEK_CUR) - input_len != st.st_size)
 		die(_("pack has junk at the end"));
+
+	for (i = 0; i < nr_objects; i++) {
+		struct object_entry *obj = &objects[i];
+		if (obj->real_type != OBJ_BAD)
+			continue;
+		obj->real_type = obj->type;
+		sha1_object(NULL, obj, obj->size, obj->type, obj->idx.sha1);
+		nr_delays--;
+	}
+	if (nr_delays)
+		die(_("confusion beyond insanity in parse_pack_objects()"));
 }
 
 /*
@@ -910,7 +1085,8 @@ static void resolve_deltas(void)
 			int ret = pthread_create(&thread_data[i].thread, NULL,
 						 threaded_second_pass, thread_data + i);
 			if (ret)
-				die("unable to create thread: %s", strerror(ret));
+				die(_("unable to create thread: %s"),
+				    strerror(ret));
 		}
 		for (i = 0; i < nr_threads; i++)
 			pthread_join(thread_data[i].thread, NULL);
@@ -947,7 +1123,7 @@ static void conclude_pack(int fix_thin_pack, const char *curr_pack, unsigned cha
 	if (fix_thin_pack) {
 		struct sha1file *f;
 		unsigned char read_sha1[20], tail_sha1[20];
-		char msg[48];
+		struct strbuf msg = STRBUF_INIT;
 		int nr_unresolved = nr_deltas - nr_resolved_deltas;
 		int nr_objects_initial = nr_objects;
 		if (nr_unresolved <= 0)
@@ -955,19 +1131,22 @@ static void conclude_pack(int fix_thin_pack, const char *curr_pack, unsigned cha
 		objects = xrealloc(objects,
 				   (nr_objects + nr_unresolved + 1)
 				   * sizeof(*objects));
+		memset(objects + nr_objects + 1, 0,
+		       nr_unresolved * sizeof(*objects));
 		f = sha1fd(output_fd, curr_pack);
 		fix_unresolved_deltas(f, nr_unresolved);
-		sprintf(msg, "completed with %d local objects",
-			nr_objects - nr_objects_initial);
-		stop_progress_msg(&progress, msg);
+		strbuf_addf(&msg, _("completed with %d local objects"),
+			    nr_objects - nr_objects_initial);
+		stop_progress_msg(&progress, msg.buf);
+		strbuf_release(&msg);
 		sha1close(f, tail_sha1, 0);
 		hashcpy(read_sha1, pack_sha1);
 		fixup_pack_header_footer(output_fd, pack_sha1,
 					 curr_pack, nr_objects,
 					 read_sha1, consumed_bytes-20);
 		if (hashcmp(read_sha1, tail_sha1) != 0)
-			die("Unexpected tail checksum for %s "
-			    "(disk corruption?)", curr_pack);
+			die(_("Unexpected tail checksum for %s "
+			      "(disk corruption?)"), curr_pack);
 	}
 	if (nr_deltas != nr_resolved_deltas)
 		die(Q_("pack has %d unresolved delta",
@@ -1176,17 +1355,17 @@ static int git_index_pack_config(const char *k, const char *v, void *cb)
 	if (!strcmp(k, "pack.indexversion")) {
 		opts->version = git_config_int(k, v);
 		if (opts->version > 2)
-			die("bad pack.indexversion=%"PRIu32, opts->version);
+			die(_("bad pack.indexversion=%"PRIu32), opts->version);
 		return 0;
 	}
 	if (!strcmp(k, "pack.threads")) {
 		nr_threads = git_config_int(k, v);
 		if (nr_threads < 0)
-			die("invalid number of threads specified (%d)",
+			die(_("invalid number of threads specified (%d)"),
 			    nr_threads);
 #ifdef NO_PTHREADS
 		if (nr_threads != 1)
-			warning("no threads support, ignoring %s", k);
+			warning(_("no threads support, ignoring %s"), k);
 		nr_threads = 1;
 #endif
 		return 0;
@@ -1310,7 +1489,7 @@ static void show_pack_info(int stat_only)
 
 int cmd_index_pack(int argc, const char **argv, const char *prefix)
 {
-	int i, fix_thin_pack = 0, verify = 0, stat_only = 0, stat = 0;
+	int i, fix_thin_pack = 0, verify = 0, stat_only = 0;
 	const char *curr_pack, *curr_index;
 	const char *index_name = NULL, *pack_name = NULL;
 	const char *keep_name = NULL, *keep_msg = NULL;
@@ -1318,6 +1497,7 @@ int cmd_index_pack(int argc, const char **argv, const char *prefix)
 	struct pack_idx_entry **idx_objects;
 	struct pack_idx_option opts;
 	unsigned char pack_sha1[20];
+	unsigned foreign_nr = 1;	/* zero is a "good" value, assume bad */
 
 	if (argc == 2 && !strcmp(argv[1], "-h"))
 		usage(index_pack_usage);
@@ -1339,14 +1519,18 @@ int cmd_index_pack(int argc, const char **argv, const char *prefix)
 				fix_thin_pack = 1;
 			} else if (!strcmp(arg, "--strict")) {
 				strict = 1;
+				do_fsck_object = 1;
+			} else if (!strcmp(arg, "--check-self-contained-and-connected")) {
+				strict = 1;
+				check_self_contained_and_connected = 1;
 			} else if (!strcmp(arg, "--verify")) {
 				verify = 1;
 			} else if (!strcmp(arg, "--verify-stat")) {
 				verify = 1;
-				stat = 1;
+				show_stat = 1;
 			} else if (!strcmp(arg, "--verify-stat-only")) {
 				verify = 1;
-				stat = 1;
+				show_stat = 1;
 				stat_only = 1;
 			} else if (!strcmp(arg, "--keep")) {
 				keep_msg = "";
@@ -1359,8 +1543,8 @@ int cmd_index_pack(int argc, const char **argv, const char *prefix)
 					usage(index_pack_usage);
 #ifdef NO_PTHREADS
 				if (nr_threads != 1)
-					warning("no threads support, "
-						"ignoring %s", arg);
+					warning(_("no threads support, "
+						  "ignoring %s"), arg);
 				nr_threads = 1;
 #endif
 			} else if (!prefixcmp(arg, "--pack_header=")) {
@@ -1452,9 +1636,9 @@ int cmd_index_pack(int argc, const char **argv, const char *prefix)
 	conclude_pack(fix_thin_pack, curr_pack, pack_sha1);
 	free(deltas);
 	if (strict)
-		check_objects();
+		foreign_nr = check_objects();
 
-	if (stat)
+	if (show_stat)
 		show_pack_info(stat_only);
 
 	idx_objects = xmalloc((nr_objects) * sizeof(struct pack_idx_entry *));
@@ -1477,6 +1661,12 @@ int cmd_index_pack(int argc, const char **argv, const char *prefix)
 		free((void *) curr_pack);
 	if (index_name == NULL)
 		free((void *) curr_index);
+
+	/*
+	 * Let the caller know this pack is not self contained
+	 */
+	if (check_self_contained_and_connected && foreign_nr)
+		return 1;
 
 	return 0;
 }

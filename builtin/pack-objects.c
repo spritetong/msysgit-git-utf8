@@ -16,11 +16,12 @@
 #include "list-objects.h"
 #include "progress.h"
 #include "refs.h"
+#include "streaming.h"
 #include "thread-utils.h"
 
 static const char *pack_usage[] = {
-	"git pack-objects --stdout [options...] [< ref-list | < object-list]",
-	"git pack-objects [options...] base-name [< ref-list | < object-list]",
+	N_("git pack-objects --stdout [options...] [< ref-list | < object-list]"),
+	N_("git pack-objects [options...] base-name [< ref-list | < object-list]"),
 	NULL
 };
 
@@ -37,17 +38,18 @@ struct object_entry {
 	void *delta_data;	/* cached delta (uncompressed) */
 	unsigned long delta_size;	/* delta data size (uncompressed) */
 	unsigned long z_delta_size;	/* delta data size (compressed) */
-	unsigned int hash;	/* name hint hash */
 	enum object_type type;
 	enum object_type in_pack_type;	/* could be delta */
+	uint32_t hash;			/* name hint hash */
 	unsigned char in_pack_header_size;
-	unsigned char preferred_base; /* we do not pack this, but is available
-				       * to be used as the base object to delta
-				       * objects against.
-				       */
-	unsigned char no_try_delta;
-	unsigned char tagged; /* near the very tip of refs */
-	unsigned char filled; /* assigned write-order */
+	unsigned preferred_base:1; /*
+				    * we do not pack this, but is available
+				    * to be used as the base object to delta
+				    * objects against.
+				    */
+	unsigned no_try_delta:1;
+	unsigned tagged:1; /* near the very tip of refs */
+	unsigned filled:1; /* assigned write-order */
 };
 
 /*
@@ -150,6 +152,46 @@ static unsigned long do_compress(void **pptr, unsigned long size)
 	return stream.total_out;
 }
 
+static unsigned long write_large_blob_data(struct git_istream *st, struct sha1file *f,
+					   const unsigned char *sha1)
+{
+	git_zstream stream;
+	unsigned char ibuf[1024 * 16];
+	unsigned char obuf[1024 * 16];
+	unsigned long olen = 0;
+
+	memset(&stream, 0, sizeof(stream));
+	git_deflate_init(&stream, pack_compression_level);
+
+	for (;;) {
+		ssize_t readlen;
+		int zret = Z_OK;
+		readlen = read_istream(st, ibuf, sizeof(ibuf));
+		if (readlen == -1)
+			die(_("unable to read %s"), sha1_to_hex(sha1));
+
+		stream.next_in = ibuf;
+		stream.avail_in = readlen;
+		while ((stream.avail_in || readlen == 0) &&
+		       (zret == Z_OK || zret == Z_BUF_ERROR)) {
+			stream.next_out = obuf;
+			stream.avail_out = sizeof(obuf);
+			zret = git_deflate(&stream, readlen ? 0 : Z_FINISH);
+			sha1write(f, obuf, stream.next_out - obuf);
+			olen += stream.next_out - obuf;
+		}
+		if (stream.avail_in)
+			die(_("deflate error (%d)"), zret);
+		if (readlen == 0) {
+			if (zret != Z_STREAM_END)
+				die(_("deflate error (%d)"), zret);
+			break;
+		}
+	}
+	git_deflate_end(&stream);
+	return olen;
+}
+
 /*
  * we are going to reuse the existing object data as is.  make
  * sure it is not corrupt.
@@ -208,11 +250,18 @@ static unsigned long write_no_reuse_object(struct sha1file *f, struct object_ent
 	unsigned hdrlen;
 	enum object_type type;
 	void *buf;
+	struct git_istream *st = NULL;
 
 	if (!usable_delta) {
-		buf = read_sha1_file(entry->idx.sha1, &type, &size);
-		if (!buf)
-			die("unable to read %s", sha1_to_hex(entry->idx.sha1));
+		if (entry->type == OBJ_BLOB &&
+		    entry->size > big_file_threshold &&
+		    (st = open_istream(entry->idx.sha1, &type, &size, NULL)) != NULL)
+			buf = NULL;
+		else {
+			buf = read_sha1_file(entry->idx.sha1, &type, &size);
+			if (!buf)
+				die(_("unable to read %s"), sha1_to_hex(entry->idx.sha1));
+		}
 		/*
 		 * make sure no cached delta data remains from a
 		 * previous attempt before a pack split occurred.
@@ -233,7 +282,9 @@ static unsigned long write_no_reuse_object(struct sha1file *f, struct object_ent
 			OBJ_OFS_DELTA : OBJ_REF_DELTA;
 	}
 
-	if (entry->z_delta_size)
+	if (st)	/* large blob case, just assume we don't compress well */
+		datalen = size;
+	else if (entry->z_delta_size)
 		datalen = entry->z_delta_size;
 	else
 		datalen = do_compress(&buf, size);
@@ -256,6 +307,8 @@ static unsigned long write_no_reuse_object(struct sha1file *f, struct object_ent
 		while (ofs >>= 7)
 			dheader[--pos] = 128 | (--ofs & 127);
 		if (limit && hdrlen + sizeof(dheader) - pos + datalen + 20 >= limit) {
+			if (st)
+				close_istream(st);
 			free(buf);
 			return 0;
 		}
@@ -268,6 +321,8 @@ static unsigned long write_no_reuse_object(struct sha1file *f, struct object_ent
 		 * an additional 20 bytes for the base sha1.
 		 */
 		if (limit && hdrlen + 20 + datalen + 20 >= limit) {
+			if (st)
+				close_istream(st);
 			free(buf);
 			return 0;
 		}
@@ -276,13 +331,20 @@ static unsigned long write_no_reuse_object(struct sha1file *f, struct object_ent
 		hdrlen += 20;
 	} else {
 		if (limit && hdrlen + datalen + 20 >= limit) {
+			if (st)
+				close_istream(st);
 			free(buf);
 			return 0;
 		}
 		sha1write(f, header, hdrlen);
 	}
-	sha1write(f, buf, datalen);
-	free(buf);
+	if (st) {
+		datalen = write_large_blob_data(st, f, entry->idx.sha1);
+		close_istream(st);
+	} else {
+		sha1write(f, buf, datalen);
+		free(buf);
+	}
 
 	return hdrlen + datalen;
 }
@@ -798,9 +860,9 @@ static void rehash_objects(void)
 	}
 }
 
-static unsigned name_hash(const char *name)
+static uint32_t name_hash(const char *name)
 {
-	unsigned c, hash = 0;
+	uint32_t c, hash = 0;
 
 	if (!name)
 		return 0;
@@ -847,7 +909,7 @@ static int add_object_entry(const unsigned char *sha1, enum object_type type,
 	struct packed_git *p, *found_pack = NULL;
 	off_t found_offset = 0;
 	int ix;
-	unsigned hash = name_hash(name);
+	uint32_t hash = name_hash(name);
 
 	ix = nr_objects ? locate_object_entry_hash(sha1) : -1;
 	if (ix >= 0) {
@@ -1748,7 +1810,7 @@ static void find_deltas(struct object_entry **list, unsigned *list_size,
 static void try_to_free_from_threads(size_t size)
 {
 	read_lock();
-	release_pack_memory(size, -1);
+	release_pack_memory(size);
 	read_unlock();
 }
 
@@ -1972,7 +2034,6 @@ static int add_ref_tag(const char *path, const unsigned char *sha1, int flag, vo
 
 	if (!prefixcmp(path, "refs/tags/") && /* is a tag? */
 	    !peel_ref(path, peeled)        && /* peelable? */
-	    !is_null_sha1(peeled)          && /* annotated tag? */
 	    locate_object_entry(peeled))      /* object packed? */
 		add_object_entry(sha1, OBJ_TAG, NULL, 0);
 	return 0;
@@ -2312,13 +2373,13 @@ static void get_object_list(int ac, const char **av)
 			}
 			die("not a rev '%s'", line);
 		}
-		if (handle_revision_arg(line, &revs, flags, 1))
+		if (handle_revision_arg(line, &revs, flags, REVARG_CANNOT_BE_FILENAME))
 			die("bad revision '%s'", line);
 	}
 
 	if (prepare_revision_walk(&revs))
 		die("revision walk setup failed");
-	mark_edges_uninteresting(revs.commits, &revs, show_edge);
+	mark_edges_uninteresting(&revs, show_edge);
 	traverse_commit_list(&revs, show_commit, show_object, NULL);
 
 	if (keep_unreachable)
@@ -2384,67 +2445,67 @@ int cmd_pack_objects(int argc, const char **argv, const char *prefix)
 	int rev_list_unpacked = 0, rev_list_all = 0, rev_list_reflog = 0;
 	struct option pack_objects_options[] = {
 		OPT_SET_INT('q', "quiet", &progress,
-			    "do not show progress meter", 0),
+			    N_("do not show progress meter"), 0),
 		OPT_SET_INT(0, "progress", &progress,
-			    "show progress meter", 1),
+			    N_("show progress meter"), 1),
 		OPT_SET_INT(0, "all-progress", &progress,
-			    "show progress meter during object writing phase", 2),
+			    N_("show progress meter during object writing phase"), 2),
 		OPT_BOOL(0, "all-progress-implied",
 			 &all_progress_implied,
-			 "similar to --all-progress when progress meter is shown"),
-		{ OPTION_CALLBACK, 0, "index-version", NULL, "version[,offset]",
-		  "write the pack index file in the specified idx format version",
+			 N_("similar to --all-progress when progress meter is shown")),
+		{ OPTION_CALLBACK, 0, "index-version", NULL, N_("version[,offset]"),
+		  N_("write the pack index file in the specified idx format version"),
 		  0, option_parse_index_version },
 		OPT_ULONG(0, "max-pack-size", &pack_size_limit,
-			  "maximum size of each output pack file"),
+			  N_("maximum size of each output pack file")),
 		OPT_BOOL(0, "local", &local,
-			 "ignore borrowed objects from alternate object store"),
+			 N_("ignore borrowed objects from alternate object store")),
 		OPT_BOOL(0, "incremental", &incremental,
-			 "ignore packed objects"),
+			 N_("ignore packed objects")),
 		OPT_INTEGER(0, "window", &window,
-			    "limit pack window by objects"),
+			    N_("limit pack window by objects")),
 		OPT_ULONG(0, "window-memory", &window_memory_limit,
-			  "limit pack window by memory in addition to object limit"),
+			  N_("limit pack window by memory in addition to object limit")),
 		OPT_INTEGER(0, "depth", &depth,
-			    "maximum length of delta chain allowed in the resulting pack"),
+			    N_("maximum length of delta chain allowed in the resulting pack")),
 		OPT_BOOL(0, "reuse-delta", &reuse_delta,
-			 "reuse existing deltas"),
+			 N_("reuse existing deltas")),
 		OPT_BOOL(0, "reuse-object", &reuse_object,
-			 "reuse existing objects"),
+			 N_("reuse existing objects")),
 		OPT_BOOL(0, "delta-base-offset", &allow_ofs_delta,
-			 "use OFS_DELTA objects"),
+			 N_("use OFS_DELTA objects")),
 		OPT_INTEGER(0, "threads", &delta_search_threads,
-			    "use threads when searching for best delta matches"),
+			    N_("use threads when searching for best delta matches")),
 		OPT_BOOL(0, "non-empty", &non_empty,
-			 "do not create an empty pack output"),
+			 N_("do not create an empty pack output")),
 		OPT_BOOL(0, "revs", &use_internal_rev_list,
-			 "read revision arguments from standard input"),
+			 N_("read revision arguments from standard input")),
 		{ OPTION_SET_INT, 0, "unpacked", &rev_list_unpacked, NULL,
-		  "limit the objects to those that are not yet packed",
+		  N_("limit the objects to those that are not yet packed"),
 		  PARSE_OPT_NOARG | PARSE_OPT_NONEG, NULL, 1 },
 		{ OPTION_SET_INT, 0, "all", &rev_list_all, NULL,
-		  "include objects reachable from any reference",
+		  N_("include objects reachable from any reference"),
 		  PARSE_OPT_NOARG | PARSE_OPT_NONEG, NULL, 1 },
 		{ OPTION_SET_INT, 0, "reflog", &rev_list_reflog, NULL,
-		  "include objects referred by reflog entries",
+		  N_("include objects referred by reflog entries"),
 		  PARSE_OPT_NOARG | PARSE_OPT_NONEG, NULL, 1 },
 		OPT_BOOL(0, "stdout", &pack_to_stdout,
-			 "output pack to stdout"),
+			 N_("output pack to stdout")),
 		OPT_BOOL(0, "include-tag", &include_tag,
-			 "include tag objects that refer to objects to be packed"),
+			 N_("include tag objects that refer to objects to be packed")),
 		OPT_BOOL(0, "keep-unreachable", &keep_unreachable,
-			 "keep unreachable objects"),
-		{ OPTION_CALLBACK, 0, "unpack-unreachable", NULL, "time",
-		  "unpack unreachable objects newer than <time>",
+			 N_("keep unreachable objects")),
+		{ OPTION_CALLBACK, 0, "unpack-unreachable", NULL, N_("time"),
+		  N_("unpack unreachable objects newer than <time>"),
 		  PARSE_OPT_OPTARG, option_parse_unpack_unreachable },
 		OPT_BOOL(0, "thin", &thin,
-			 "create thin packs"),
+			 N_("create thin packs")),
 		OPT_BOOL(0, "honor-pack-keep", &ignore_packed_keep,
-			 "ignore packs that have companion .keep file"),
+			 N_("ignore packs that have companion .keep file")),
 		OPT_INTEGER(0, "compression", &pack_compression_level,
-			    "pack compression level"),
+			    N_("pack compression level")),
 		OPT_SET_INT(0, "keep-true-parents", &grafts_replace_parents,
-			    "do not hide commits by grafts", 0),
+			    N_("do not hide commits by grafts"), 0),
 		OPT_END(),
 	};
 

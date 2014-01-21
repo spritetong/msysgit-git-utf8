@@ -5,9 +5,12 @@
 #include "refs.h"
 #include "run-command.h"
 #include "remote.h"
+#include "connect.h"
 #include "url.h"
+#include "string-list.h"
 
 static char *server_capabilities;
+static const char *parse_feature_value(const char *, const char *, int *);
 
 static int check_ref(const char *name, int len, unsigned int flags)
 {
@@ -49,26 +52,98 @@ static void add_extra_have(struct extra_have_objects *extra, unsigned char *sha1
 	extra->nr++;
 }
 
+static void die_initial_contact(int got_at_least_one_head)
+{
+	if (got_at_least_one_head)
+		die("The remote end hung up upon initial contact");
+	else
+		die("Could not read from remote repository.\n\n"
+		    "Please make sure you have the correct access rights\n"
+		    "and the repository exists.");
+}
+
+static void parse_one_symref_info(struct string_list *symref, const char *val, int len)
+{
+	char *sym, *target;
+	struct string_list_item *item;
+
+	if (!len)
+		return; /* just "symref" */
+	/* e.g. "symref=HEAD:refs/heads/master" */
+	sym = xmalloc(len + 1);
+	memcpy(sym, val, len);
+	sym[len] = '\0';
+	target = strchr(sym, ':');
+	if (!target)
+		/* just "symref=something" */
+		goto reject;
+	*(target++) = '\0';
+	if (check_refname_format(sym, REFNAME_ALLOW_ONELEVEL) ||
+	    check_refname_format(target, REFNAME_ALLOW_ONELEVEL))
+		/* "symref=bogus:pair */
+		goto reject;
+	item = string_list_append(symref, sym);
+	item->util = target;
+	return;
+reject:
+	free(sym);
+	return;
+}
+
+static void annotate_refs_with_symref_info(struct ref *ref)
+{
+	struct string_list symref = STRING_LIST_INIT_DUP;
+	const char *feature_list = server_capabilities;
+
+	while (feature_list) {
+		int len;
+		const char *val;
+
+		val = parse_feature_value(feature_list, "symref", &len);
+		if (!val)
+			break;
+		parse_one_symref_info(&symref, val, len);
+		feature_list = val + 1;
+	}
+	sort_string_list(&symref);
+
+	for (; ref; ref = ref->next) {
+		struct string_list_item *item;
+		item = string_list_lookup(&symref, ref->name);
+		if (!item)
+			continue;
+		ref->symref = xstrdup((char *)item->util);
+	}
+	string_list_clear(&symref, 0);
+}
+
 /*
  * Read all the refs from the other end
  */
-struct ref **get_remote_heads(int in, struct ref **list,
-			      unsigned int flags,
+struct ref **get_remote_heads(int in, char *src_buf, size_t src_len,
+			      struct ref **list, unsigned int flags,
 			      struct extra_have_objects *extra_have)
 {
+	struct ref **orig_list = list;
+	int got_at_least_one_head = 0;
+
 	*list = NULL;
 	for (;;) {
 		struct ref *ref;
 		unsigned char old_sha1[20];
-		static char buffer[1000];
 		char *name;
 		int len, name_len;
+		char *buffer = packet_buffer;
 
-		len = packet_read_line(in, buffer, sizeof(buffer));
+		len = packet_read(in, &src_buf, &src_len,
+				  packet_buffer, sizeof(packet_buffer),
+				  PACKET_READ_GENTLE_ON_EOF |
+				  PACKET_READ_CHOMP_NEWLINE);
+		if (len < 0)
+			die_initial_contact(got_at_least_one_head);
+
 		if (!len)
 			break;
-		if (buffer[len-1] == '\n')
-			buffer[--len] = 0;
 
 		if (len > 4 && !prefixcmp(buffer, "ERR "))
 			die("remote error: %s", buffer + 4);
@@ -95,16 +170,15 @@ struct ref **get_remote_heads(int in, struct ref **list,
 		hashcpy(ref->old_sha1, old_sha1);
 		*list = ref;
 		list = &ref->next;
+		got_at_least_one_head = 1;
 	}
+
+	annotate_refs_with_symref_info(*orig_list);
+
 	return list;
 }
 
-int server_supports(const char *feature)
-{
-	return !!parse_feature_request(server_capabilities, feature);
-}
-
-const char *parse_feature_request(const char *feature_list, const char *feature)
+static const char *parse_feature_value(const char *feature_list, const char *feature, int *lenp)
 {
 	int len;
 
@@ -116,12 +190,44 @@ const char *parse_feature_request(const char *feature_list, const char *feature)
 		const char *found = strstr(feature_list, feature);
 		if (!found)
 			return NULL;
-		if ((feature_list == found || isspace(found[-1])) &&
-		    (!found[len] || isspace(found[len]) || found[len] == '='))
-			return found;
+		if (feature_list == found || isspace(found[-1])) {
+			const char *value = found + len;
+			/* feature with no value (e.g., "thin-pack") */
+			if (!*value || isspace(*value)) {
+				if (lenp)
+					*lenp = 0;
+				return value;
+			}
+			/* feature with a value (e.g., "agent=git/1.2.3") */
+			else if (*value == '=') {
+				value++;
+				if (lenp)
+					*lenp = strcspn(value, " \t\n");
+				return value;
+			}
+			/*
+			 * otherwise we matched a substring of another feature;
+			 * keep looking
+			 */
+		}
 		feature_list = found + 1;
 	}
 	return NULL;
+}
+
+int parse_feature_request(const char *feature_list, const char *feature)
+{
+	return !!parse_feature_value(feature_list, feature, NULL);
+}
+
+const char *server_feature_value(const char *feature, int *len)
+{
+	return parse_feature_value(server_capabilities, feature, len);
+}
+
+int server_supports(const char *feature)
+{
+	return !!server_feature_value(feature, NULL);
 }
 
 enum protocol {
@@ -507,8 +613,11 @@ struct child_process *git_connect(int fd[2], const char *url_orig,
 	path = strchr(end, c);
 	if (path && !has_dos_drive_prefix(end)) {
 		if (c == ':') {
-			protocol = PROTO_SSH;
-			*path++ = '\0';
+			if (host != url || path < strchrnul(host, '/')) {
+				protocol = PROTO_SSH;
+				*path++ = '\0';
+			} else /* '/' in the host part, assume local path */
+				path = end;
 		}
 	} else
 		path = end;
@@ -536,7 +645,7 @@ struct child_process *git_connect(int fd[2], const char *url_orig,
 	 * Add support for ssh port: ssh://host.xy:<port>/...
 	 */
 	if (protocol == PROTO_SSH && host != url)
-		port = get_port(host);
+		port = get_port(end);
 
 	if (protocol == PROTO_GIT) {
 		/* These underlying connection commands die() if they

@@ -7,10 +7,10 @@
 #include "unpack-trees.h"
 
 static char const * const archive_usage[] = {
-	"git archive [options] <tree-ish> [<path>...]",
-	"git archive --list",
-	"git archive --remote <repo> [--exec <cmd>] [options] <tree-ish> [<path>...]",
-	"git archive --remote <repo> [--exec <cmd>] --list",
+	N_("git archive [options] <tree-ish> [<path>...]"),
+	N_("git archive --list"),
+	N_("git archive --remote <repo> [--exec <cmd>] [options] <tree-ish> [<path>...]"),
+	N_("git archive --remote <repo> [--exec <cmd>] --list"),
 	NULL
 };
 
@@ -120,6 +120,8 @@ static int write_archive_entry(const unsigned char *sha1, const char *base,
 	strbuf_add(&path, args->base, args->baselen);
 	strbuf_add(&path, base, baselen);
 	strbuf_addstr(&path, filename);
+	if (S_ISDIR(mode) || S_ISGITLINK(mode))
+		strbuf_addch(&path, '/');
 	path_without_prefix = path.buf + args->baselen;
 
 	setup_archive_check(check);
@@ -130,7 +132,6 @@ static int write_archive_entry(const unsigned char *sha1, const char *base,
 	}
 
 	if (S_ISDIR(mode) || S_ISGITLINK(mode)) {
-		strbuf_addch(&path, '/');
 		if (args->verbose)
 			fprintf(stderr, "%.*s\n", (int)path.len, path.buf);
 		err = write_entry(args, sha1, path.buf, path.len, mode);
@@ -150,7 +151,6 @@ int write_archive_entries(struct archiver_args *args,
 	struct archiver_context context;
 	struct unpack_trees_options opts;
 	struct tree_desc t;
-	struct pathspec pathspec;
 	int err;
 
 	if (args->baselen > 0 && args->base[args->baselen - 1] == '/') {
@@ -185,10 +185,8 @@ int write_archive_entries(struct archiver_args *args,
 		git_attr_set_direction(GIT_ATTR_INDEX, &the_index);
 	}
 
-	init_pathspec(&pathspec, args->pathspec);
-	err = read_tree_recursive(args->tree, "", 0, 0, &pathspec,
+	err = read_tree_recursive(args->tree, "", 0, 0, &args->pathspec,
 				  write_archive_entry, &context);
-	free_pathspec(&pathspec);
 	if (err == READ_TREE_RECURSIVE)
 		err = 0;
 	return err;
@@ -221,7 +219,7 @@ static int path_exists(struct tree *tree, const char *path)
 	struct pathspec pathspec;
 	int ret;
 
-	init_pathspec(&pathspec, paths);
+	parse_pathspec(&pathspec, 0, 0, "", paths);
 	ret = read_tree_recursive(tree, "", 0, 0, &pathspec, reject_entry, NULL);
 	free_pathspec(&pathspec);
 	return ret != 0;
@@ -230,11 +228,18 @@ static int path_exists(struct tree *tree, const char *path)
 static void parse_pathspec_arg(const char **pathspec,
 		struct archiver_args *ar_args)
 {
-	ar_args->pathspec = pathspec = get_pathspec("", pathspec);
+	/*
+	 * must be consistent with parse_pathspec in path_exists()
+	 * Also if pathspec patterns are dependent, we're in big
+	 * trouble as we test each one separately
+	 */
+	parse_pathspec(&ar_args->pathspec, 0,
+		       PATHSPEC_PREFER_FULL,
+		       "", pathspec);
 	if (pathspec) {
 		while (*pathspec) {
-			if (!path_exists(ar_args->tree, *pathspec))
-				die("path not found: %s", *pathspec);
+			if (**pathspec && !path_exists(ar_args->tree, *pathspec))
+				die(_("pathspec '%s' did not match any files"), *pathspec);
 			pathspec++;
 		}
 	}
@@ -319,16 +324,16 @@ static int parse_archive_args(int argc, const char **argv,
 	int worktree_attributes = 0;
 	struct option opts[] = {
 		OPT_GROUP(""),
-		OPT_STRING(0, "format", &format, "fmt", "archive format"),
-		OPT_STRING(0, "prefix", &base, "prefix",
-			"prepend prefix to each pathname in the archive"),
-		OPT_STRING('o', "output", &output, "file",
-			"write the archive to this file"),
+		OPT_STRING(0, "format", &format, N_("fmt"), N_("archive format")),
+		OPT_STRING(0, "prefix", &base, N_("prefix"),
+			N_("prepend prefix to each pathname in the archive")),
+		OPT_STRING('o', "output", &output, N_("file"),
+			N_("write the archive to this file")),
 		OPT_BOOL(0, "worktree-attributes", &worktree_attributes,
-			"read .gitattributes in working directory"),
-		OPT__VERBOSE(&verbose, "report archived files on stderr"),
-		OPT__COMPR('0', &compression_level, "store only", 0),
-		OPT__COMPR('1', &compression_level, "compress faster", 1),
+			N_("read .gitattributes in working directory")),
+		OPT__VERBOSE(&verbose, N_("report archived files on stderr")),
+		OPT__COMPR('0', &compression_level, N_("store only"), 0),
+		OPT__COMPR('1', &compression_level, N_("compress faster"), 1),
 		OPT__COMPR_HIDDEN('2', &compression_level, 2),
 		OPT__COMPR_HIDDEN('3', &compression_level, 3),
 		OPT__COMPR_HIDDEN('4', &compression_level, 4),
@@ -336,15 +341,15 @@ static int parse_archive_args(int argc, const char **argv,
 		OPT__COMPR_HIDDEN('6', &compression_level, 6),
 		OPT__COMPR_HIDDEN('7', &compression_level, 7),
 		OPT__COMPR_HIDDEN('8', &compression_level, 8),
-		OPT__COMPR('9', &compression_level, "compress better", 9),
+		OPT__COMPR('9', &compression_level, N_("compress better"), 9),
 		OPT_GROUP(""),
 		OPT_BOOL('l', "list", &list,
-			"list supported archive formats"),
+			N_("list supported archive formats")),
 		OPT_GROUP(""),
-		OPT_STRING(0, "remote", &remote, "repo",
-			"retrieve the archive from remote repository <repo>"),
-		OPT_STRING(0, "exec", &exec, "cmd",
-			"path to the remote git-upload-archive command"),
+		OPT_STRING(0, "remote", &remote, N_("repo"),
+			N_("retrieve the archive from remote repository <repo>")),
+		OPT_STRING(0, "exec", &exec, N_("command"),
+			N_("path to the remote git-upload-archive command")),
 		OPT_END()
 	};
 
@@ -435,7 +440,7 @@ static int match_extension(const char *filename, const char *ext)
 	 * prefix is non-empty (k.e., we don't match .tar.gz with no actual
 	 * filename).
 	 */
-	if (prefixlen < 2 || filename[prefixlen-1] != '.')
+	if (prefixlen < 2 || filename[prefixlen - 1] != '.')
 		return 0;
 	return !strcmp(filename + prefixlen, ext);
 }

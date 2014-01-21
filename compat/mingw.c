@@ -3,6 +3,7 @@
 
 #include "../git-compat-util.h"
 #include "win32.h"
+#include <conio.h>
 #include <wchar.h>
 #include "../strbuf.h"
 #include "../run-command.h"
@@ -207,7 +208,7 @@ int mingw_unlink(const char *pathname)
 {
 	int ret, tries = 0;
 	wchar_t wpathname[MAX_PATH];
-	if (xutftowcs_path(wpathname, pathname) < 0)
+	if (xutftowcs_canonical_path(wpathname, pathname) < 0)
 		return -1;
 
 	/* read-only files cannot be removed */
@@ -258,11 +259,13 @@ int mingw_rmdir(const char *pathname)
 {
 	int ret, tries = 0;
 	wchar_t wpathname[MAX_PATH];
-	if (xutftowcs_path(wpathname, pathname) < 0)
+	if (xutftowcs_canonical_path(wpathname, pathname) < 0)
 		return -1;
 
 	while ((ret = _wrmdir(wpathname)) == -1 && tries < ARRAY_SIZE(delay)) {
 		if (!is_file_in_use_error(GetLastError()))
+			errno = err_win_to_posix(GetLastError());
+		if (errno != EACCES)
 			break;
 		if (!is_dir_empty(wpathname)) {
 			errno = ENOTEMPTY;
@@ -278,7 +281,7 @@ int mingw_rmdir(const char *pathname)
 		Sleep(delay[tries]);
 		tries++;
 	}
-	while (ret == -1 && is_file_in_use_error(GetLastError()) &&
+	while (ret == -1 && errno == EACCES && is_file_in_use_error(GetLastError()) &&
 	       ask_yes_no_if_possible("Deletion of directory '%s' failed. "
 			"Should I try again?", pathname))
 	       ret = _wrmdir(wpathname);
@@ -298,7 +301,7 @@ void mingw_mark_as_git_dir(const char *dir)
 {
 	wchar_t wdir[MAX_PATH];
 	if (hide_dotfiles != HIDE_DOTFILES_FALSE && !is_bare_repository())
-		if (xutftowcs_path(wdir, dir) < 0 || make_hidden(wdir))
+		if (xutftowcs_canonical_path(wdir, dir) < 0 || make_hidden(wdir))
 			warning("Failed to make '%s' hidden", dir);
 	git_config_set("core.hideDotFiles",
 		hide_dotfiles == HIDE_DOTFILES_FALSE ? "false" :
@@ -310,7 +313,7 @@ int mingw_mkdir(const char *path, int mode)
 {
 	int ret;
 	wchar_t wpath[MAX_PATH];
-	if (xutftowcs_path(wpath, path) < 0)
+	if (xutftowcs_canonical_path(wpath, path) < 0)
 		return -1;
 	ret = _wmkdir(wpath);
 	if (!ret && hide_dotfiles == HIDE_DOTFILES_TRUE) {
@@ -340,7 +343,7 @@ int mingw_open (const char *filename, int oflags, ...)
 	if (filename && !strcmp(filename, "/dev/null"))
 		filename = "nul";
 
-	if (xutftowcs_path(wfilename, filename) < 0)
+	if (xutftowcs_canonical_path(wfilename, filename) < 0)
 		return -1;
 	fd = _wopen(wfilename, oflags, mode);
 
@@ -380,6 +383,32 @@ ssize_t mingw_write(int fd, const void *buf, size_t count)
 	return write(fd, buf, min(count, 31 * 1024 * 1024));
 }
 
+static BOOL WINAPI ctrl_ignore(DWORD type)
+{
+	return TRUE;
+}
+
+#undef fgetc
+int mingw_fgetc(FILE *stream)
+{
+	int ch;
+	if (!isatty(_fileno(stream)))
+		return fgetc(stream);
+
+	SetConsoleCtrlHandler(ctrl_ignore, TRUE);
+	while (1) {
+		ch = fgetc(stream);
+		if (ch != EOF || GetLastError() != ERROR_OPERATION_ABORTED)
+			break;
+
+		/* Ctrl+C was pressed, simulate SIGINT and retry */
+		mingw_raise(SIGINT);
+	}
+	SetConsoleCtrlHandler(ctrl_ignore, FALSE);
+	return ch;
+}
+
+#undef fopen
 FILE *mingw_fopen (const char *filename, const char *otype)
 {
 	int hide = 0;
@@ -390,7 +419,7 @@ FILE *mingw_fopen (const char *filename, const char *otype)
 		hide = access(filename, F_OK);
 	if (filename && !strcmp(filename, "/dev/null"))
 		filename = "nul";
-	if (xutftowcs_path(wfilename, filename) < 0 ||
+	if (xutftowcs_canonical_path(wfilename, filename) < 0 ||
 		xutftowcs(wotype, otype, ARRAY_SIZE(wotype)) < 0)
 		return NULL;
 	file = _wfopen(wfilename, wotype);
@@ -409,7 +438,7 @@ FILE *mingw_freopen (const char *filename, const char *otype, FILE *stream)
 		hide = access(filename, F_OK);
 	if (filename && !strcmp(filename, "/dev/null"))
 		filename = "nul";
-	if (xutftowcs_path(wfilename, filename) < 0 ||
+	if (xutftowcs_canonical_path(wfilename, filename) < 0 ||
 		xutftowcs(wotype, otype, ARRAY_SIZE(wotype)) < 0)
 		return NULL;
 	file = _wfreopen(wfilename, wotype, stream);
@@ -418,10 +447,32 @@ FILE *mingw_freopen (const char *filename, const char *otype, FILE *stream)
 	return file;
 }
 
+#undef fflush
+int mingw_fflush(FILE *stream)
+{
+	int ret = fflush(stream);
+
+	/*
+	 * write() is used behind the scenes of stdio output functions.
+	 * Since git code does not check for errors after each stdio write
+	 * operation, it can happen that write() is called by a later
+	 * stdio function even if an earlier write() call failed. In the
+	 * case of a pipe whose readable end was closed, only the first
+	 * call to write() reports EPIPE on Windows. Subsequent write()
+	 * calls report EINVAL. It is impossible to notice whether this
+	 * fflush invocation triggered such a case, therefore, we have to
+	 * catch all EINVAL errors whole-sale.
+	 */
+	if (ret && errno == EINVAL)
+		errno = EPIPE;
+
+	return ret;
+}
+
 int mingw_access(const char *filename, int mode)
 {
 	wchar_t wfilename[MAX_PATH];
-	if (xutftowcs_path(wfilename, filename) < 0)
+	if (xutftowcs_canonical_path(wfilename, filename) < 0)
 		return -1;
 	/* X_OK is not supported by the MSVCRT version */
 	return _waccess(wfilename, mode & ~X_OK);
@@ -430,7 +481,7 @@ int mingw_access(const char *filename, int mode)
 int mingw_chdir(const char *dirname)
 {
 	wchar_t wdirname[MAX_PATH];
-	if (xutftowcs_path(wdirname, dirname) < 0)
+	if (xutftowcs_canonical_path(wdirname, dirname) < 0)
 		return -1;
 	return _wchdir(wdirname);
 }
@@ -438,25 +489,9 @@ int mingw_chdir(const char *dirname)
 int mingw_chmod(const char *filename, int mode)
 {
 	wchar_t wfilename[MAX_PATH];
-	if (xutftowcs_path(wfilename, filename) < 0)
+	if (xutftowcs_canonical_path(wfilename, filename) < 0)
 		return -1;
 	return _wchmod(wfilename, mode);
-}
-
-/*
- * The unit of FILETIME is 100-nanoseconds since January 1, 1601, UTC.
- * Returns the 100-nanoseconds ("hekto nanoseconds") since the epoch.
- */
-static inline long long filetime_to_hnsec(const FILETIME *ft)
-{
-	long long winTime = ((long long)ft->dwHighDateTime << 32) + ft->dwLowDateTime;
-	/* Windows to Unix Epoch conversion */
-	return winTime - 116444736000000000LL;
-}
-
-static inline time_t filetime_to_time_t(const FILETIME *ft)
-{
-	return (time_t)(filetime_to_hnsec(ft) / 10000000);
 }
 
 /* We keep the do_lstat code in a separate function to avoid recursion.
@@ -470,7 +505,7 @@ static int do_lstat(int follow, const char *file_name, struct stat *buf)
 {
 	WIN32_FILE_ATTRIBUTE_DATA fdata;
 	wchar_t wfilename[MAX_PATH];
-	if (xutftowcs_path(wfilename, file_name) < 0)
+	if (xutftowcs_canonical_path(wfilename, file_name) < 0)
 		return -1;
 
 	if (GetFileAttributesExW(wfilename, GetFileExInfoStandard, &fdata)) {
@@ -559,6 +594,8 @@ static int do_stat_internal(int follow, const char *file_name, struct stat *buf)
 	return do_lstat(follow, alt_name, buf);
 }
 
+int (*lstat)(const char *file_name, struct stat *buf) = mingw_lstat;
+
 int mingw_lstat(const char *file_name, struct stat *buf)
 {
 	return do_stat_internal(0, file_name, buf);
@@ -568,7 +605,6 @@ int mingw_stat(const char *file_name, struct stat *buf)
 	return do_stat_internal(1, file_name, buf);
 }
 
-#undef fstat
 int mingw_fstat(int fd, struct stat *buf)
 {
 	HANDLE fh = (HANDLE)_get_osfhandle(fd);
@@ -613,7 +649,7 @@ int mingw_utime (const char *file_name, const struct utimbuf *times)
 	int fh, rc;
 	DWORD attrs;
 	wchar_t wfilename[MAX_PATH];
-	if (xutftowcs_path(wfilename, file_name) < 0)
+	if (xutftowcs_canonical_path(wfilename, file_name) < 0)
 		return -1;
 
 	/* must have write permission */
@@ -1070,8 +1106,8 @@ struct pinfo_t {
 	struct pinfo_t *next;
 	pid_t pid;
 	HANDLE proc;
-} pinfo_t;
-struct pinfo_t *pinfo = NULL;
+};
+static struct pinfo_t *pinfo = NULL;
 CRITICAL_SECTION pinfo_cs;
 
 static pid_t mingw_spawnve_fd(const char *cmd, const char **argv, char **deltaenv,
@@ -1299,6 +1335,12 @@ int mingw_kill(pid_t pid, int sig)
 		errno = err_win_to_posix(GetLastError());
 		CloseHandle(h);
 		return -1;
+	} else if (pid > 0 && sig == 0) {
+		HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+		if (h) {
+			CloseHandle(h);
+			return 0;
+		}
 	}
 
 	errno = EINVAL;
@@ -1362,7 +1404,7 @@ static int WSAAPI getaddrinfo_stub(const char *node, const char *service,
 	else
 		sin->sin_addr.s_addr = INADDR_LOOPBACK;
 	ai->ai_addr = (struct sockaddr *)sin;
-	ai->ai_next = 0;
+	ai->ai_next = NULL;
 	return 0;
 }
 
@@ -1603,7 +1645,8 @@ int mingw_rename(const char *pold, const char *pnew)
 	DWORD attrs, gle;
 	int tries = 0;
 	wchar_t wpold[MAX_PATH], wpnew[MAX_PATH];
-	if (xutftowcs_path(wpold, pold) < 0 || xutftowcs_path(wpnew, pnew) < 0)
+	if (xutftowcs_canonical_path(wpold, pold) < 0 ||
+		xutftowcs_canonical_path(wpnew, pnew) < 0)
 		return -1;
 
 	/*
@@ -1685,7 +1728,7 @@ static HANDLE timer_event;
 static HANDLE timer_thread;
 static int timer_interval;
 static int one_shot;
-static sig_handler_t timer_fn = SIG_DFL;
+static sig_handler_t timer_fn = SIG_DFL, sigint_fn = SIG_DFL;
 
 /* The timer works like this:
  * The thread, ticktack(), is a trivial routine that most of the time
@@ -1699,10 +1742,7 @@ static sig_handler_t timer_fn = SIG_DFL;
 static unsigned __stdcall ticktack(void *dummy)
 {
 	while (WaitForSingleObject(timer_event, timer_interval) == WAIT_TIMEOUT) {
-		if (timer_fn == SIG_DFL)
-			die("Alarm");
-		if (timer_fn != SIG_IGN)
-			timer_fn(SIGALRM);
+		mingw_raise(SIGALRM);
 		if (one_shot)
 			break;
 	}
@@ -1792,12 +1832,51 @@ int sigaction(int sig, struct sigaction *in, struct sigaction *out)
 #undef signal
 sig_handler_t mingw_signal(int sig, sig_handler_t handler)
 {
-	sig_handler_t old = timer_fn;
-	if (sig != SIGALRM)
+	sig_handler_t old;
+
+	switch (sig) {
+	case SIGALRM:
+		old = timer_fn;
+		timer_fn = handler;
+		break;
+
+	case SIGINT:
+		old = sigint_fn;
+		sigint_fn = handler;
+		break;
+
+	default:
 		return signal(sig, handler);
-	timer_fn = handler;
+	}
+
 	return old;
 }
+
+#undef raise
+int mingw_raise(int sig)
+{
+	switch (sig) {
+	case SIGALRM:
+		if (timer_fn == SIG_DFL) {
+			if (isatty(STDERR_FILENO))
+				fputs("Alarm clock\n", stderr);
+			exit(128 + SIGALRM);
+		} else if (timer_fn != SIG_IGN)
+			timer_fn(SIGALRM);
+		return 0;
+
+	case SIGINT:
+		if (sigint_fn == SIG_DFL)
+			exit(128 + SIGINT);
+		else if (sigint_fn != SIG_IGN)
+			sigint_fn(SIGINT);
+		return 0;
+
+	default:
+		return raise(sig);
+	}
+}
+
 
 static const char *make_backslash_path(const char *path)
 {
@@ -1844,8 +1923,8 @@ int link(const char *oldpath, const char *newpath)
 	typedef BOOL (WINAPI *T)(LPCWSTR, LPCWSTR, LPSECURITY_ATTRIBUTES);
 	static T create_hard_link = NULL;
 	wchar_t woldpath[MAX_PATH], wnewpath[MAX_PATH];
-	if (xutftowcs_path(woldpath, oldpath) < 0 ||
-		xutftowcs_path(wnewpath, newpath) < 0)
+	if (xutftowcs_canonical_path(woldpath, oldpath) < 0 ||
+		xutftowcs_canonical_path(wnewpath, newpath) < 0)
 		return -1;
 
 	if (!create_hard_link) {

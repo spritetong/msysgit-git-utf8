@@ -139,13 +139,13 @@ static void strbuf_append_ext_header(struct strbuf *sb, const char *keyword,
 
 static unsigned int ustar_header_chksum(const struct ustar_header *header)
 {
-	const char *p = (const char *)header;
+	const unsigned char *p = (const unsigned char *)header;
 	unsigned int chksum = 0;
-	while (p < header->chksum)
+	while (p < (const unsigned char *)header->chksum)
 		chksum += *p++;
 	chksum += sizeof(header->chksum) * ' ';
 	p += sizeof(header->chksum);
-	while (p < (const char *)header + sizeof(struct ustar_header))
+	while (p < (const unsigned char *)header + sizeof(struct ustar_header))
 		chksum += *p++;
 	return chksum;
 }
@@ -153,6 +153,8 @@ static unsigned int ustar_header_chksum(const struct ustar_header *header)
 static size_t get_path_prefix(const char *path, size_t pathlen, size_t maxlen)
 {
 	size_t i = pathlen;
+	if (i > 1 && path[i - 1] == '/')
+		i--;
 	if (i > maxlen)
 		i = maxlen;
 	do {
@@ -325,20 +327,12 @@ static struct archiver *find_tar_filter(const char *name, int len)
 static int tar_filter_config(const char *var, const char *value, void *data)
 {
 	struct archiver *ar;
-	const char *dot;
 	const char *name;
 	const char *type;
 	int namelen;
 
-	if (prefixcmp(var, "tar."))
+	if (parse_config_key(var, "tar", &name, &namelen, &type) < 0 || !name)
 		return 0;
-	dot = strrchr(var, '.');
-	if (dot == var + 9)
-		return 0;
-
-	name = var + 4;
-	namelen = dot - name;
-	type = dot + 1;
 
 	ar = find_tar_filter(name, namelen);
 	if (!ar) {

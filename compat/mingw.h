@@ -1,4 +1,3 @@
-#define _WIN32_WINNT 0x0501
 #include <winsock2.h>
 #include <ws2tcpip.h>
 /* For UTF-8, suppress compiler warnings. Added by Sprite Tong, 12/5/2011. */
@@ -41,7 +40,9 @@ typedef int socklen_t;
 #define WEXITSTATUS(x) ((x) & 0xff)
 #define WTERMSIG(x) SIGTERM
 
+#ifndef EWOULDBLOCK
 #define EWOULDBLOCK EAGAIN
+#endif
 #define SHUT_WR SD_SEND
 
 #define SIGHUP 1
@@ -55,8 +56,12 @@ typedef int socklen_t;
 #define F_SETFD 2
 #define FD_CLOEXEC 0x1
 
+#ifndef EAFNOSUPPORT
 #define EAFNOSUPPORT WSAEAFNOSUPPORT
+#endif
+#ifndef ECONNABORTED
 #define ECONNABORTED WSAECONNABORTED
+#endif
 
 struct passwd {
 	char *pw_name;
@@ -183,11 +188,17 @@ int mingw_open (const char *filename, int oflags, ...);
 ssize_t mingw_write(int fd, const void *buf, size_t count);
 #define write mingw_write
 
+int mingw_fgetc(FILE *stream);
+#define fgetc mingw_fgetc
+
 FILE *mingw_fopen (const char *filename, const char *otype);
 #define fopen mingw_fopen
 
 FILE *mingw_freopen (const char *filename, const char *otype, FILE *stream);
 #define freopen mingw_freopen
+
+int mingw_fflush(FILE *stream);
+#define fflush mingw_fflush
 
 int mingw_access(const char *filename, int mode);
 #undef access
@@ -274,19 +285,51 @@ static inline int getrlimit(int resource, struct rlimit *rlp)
 	return 0;
 }
 
-/* Use mingw_lstat() instead of lstat()/stat() and
- * mingw_fstat() instead of fstat() on Windows.
+/*
+ * The unit of FILETIME is 100-nanoseconds since January 1, 1601, UTC.
+ * Returns the 100-nanoseconds ("hekto nanoseconds") since the epoch.
+ */
+static inline long long filetime_to_hnsec(const FILETIME *ft)
+{
+	long long winTime = ((long long)ft->dwHighDateTime << 32) + ft->dwLowDateTime;
+	/* Windows to Unix Epoch conversion */
+	return winTime - 116444736000000000LL;
+}
+
+static inline time_t filetime_to_time_t(const FILETIME *ft)
+{
+	return (time_t)(filetime_to_hnsec(ft) / 10000000);
+}
+
+/*
+ * Use mingw specific stat()/lstat()/fstat() implementations on Windows.
  */
 #define off_t off64_t
 #define lseek _lseeki64
-#ifndef ALREADY_DECLARED_STAT_FUNCS
+
+/* use struct stat with 64 bit st_size */
+#ifdef stat
+#undef stat
+#endif
 #define stat _stati64
 int mingw_lstat(const char *file_name, struct stat *buf);
 int mingw_stat(const char *file_name, struct stat *buf);
 int mingw_fstat(int fd, struct stat *buf);
+#ifdef fstat
+#undef fstat
+#endif
 #define fstat mingw_fstat
-#define lstat mingw_lstat
-#define _stati64(x,y) mingw_stat(x,y)
+#ifdef lstat
+#undef lstat
+#endif
+extern int (*lstat)(const char *file_name, struct stat *buf);
+
+#ifndef _stati64
+# define _stati64(x,y) mingw_stat(x,y)
+#elif defined (_USE_32BIT_TIME_T)
+# define _stat32i64(x,y) mingw_stat(x,y)
+#else
+# define _stat64(x,y) mingw_stat(x,y)
 #endif
 
 int mingw_utime(const char *file_name, const struct utimbuf *times);
@@ -306,6 +349,9 @@ static inline unsigned int git_ntohl(unsigned int x)
 
 sig_handler_t mingw_signal(int sig, sig_handler_t handler);
 #define signal mingw_signal
+
+int mingw_raise(int sig);
+#define raise mingw_raise
 
 /*
  * ANSI emulation wrappers
@@ -333,13 +379,13 @@ int mingw_offset_1st_component(const char *path);
 #define offset_1st_component mingw_offset_1st_component
 #define PATH_SEP ';'
 #define PRIuMAX "I64u"
+#define PRId64 "I64d"
 
 void mingw_open_html(const char *path);
 #define open_html mingw_open_html
 
 void mingw_mark_as_git_dir(const char *dir);
 #define mark_as_git_dir mingw_mark_as_git_dir
-
 
 /**
  * Converts UTF-8 encoded string to UTF-16LE.
@@ -412,6 +458,36 @@ static inline int xutftowcs_path(wchar_t *wcs, const char *utf)
 }
 
 /**
+ * Simplified file system specific variant of xutftowcsn, assumes output
+ * buffer size is MAX_PATH wide chars and input string is \0-terminated,
+ * fails with ENAMETOOLONG if input string is too long.  This version
+ * also canonicalizes the path before returning.
+ */
+static inline int xutftowcs_canonical_path(wchar_t *wcs, const char *utf)
+{
+	wchar_t tmp[SHRT_MAX];
+	int result;
+	result = xutftowcsn(tmp, utf, SHRT_MAX, -1);
+	if (result < 0 && errno == ERANGE)
+		errno = ENAMETOOLONG;
+	else if (wcsncmp(tmp, L"nul", 4) == 0 )
+		wcsncpy(wcs, tmp, 4);
+	else {
+		wchar_t tmp2[SHRT_MAX];
+		GetFullPathNameW(tmp, SHRT_MAX, tmp2, NULL);
+		if (wcslen(tmp2) < MAX_PATH)
+			wcsncpy(wcs, tmp2, MAX_PATH - 1);
+		else {
+			result = -1;
+			errno = ENAMETOOLONG;
+		}
+	}
+	if (result != -1)
+		result = wcslen(wcs);
+	return result;
+}
+
+/**
  * Converts UTF-16LE encoded string to UTF-8.
  *
  * Maximum space requirement for the target buffer is three UTF-8 chars per
@@ -446,13 +522,20 @@ static inline int xutftowcs_path(wchar_t *wcs, const char *utf)
 int xwcstoutf(char *utf, const wchar_t *wcs, size_t utflen);
 
 /*
+ * A critical section used in the implementation of the spawn
+ * functions (mingw_spawnv[p]e()) and waitpid(). Intialised in
+ * the replacement main() macro below.
+ */
+extern CRITICAL_SECTION pinfo_cs;
+
+/*
  * A replacement of main() that adds win32 specific initialization.
  */
 
 void mingw_startup();
 #define main(c,v) dummy_decl_mingw_main(); \
-static int mingw_main(); \
-int main(int argc, const char **argv) \
+static int mingw_main(c,v); \
+int main(c,v) \
 { \
 	mingw_startup(); \
 	return mingw_main(__argc, __argv); \

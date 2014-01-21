@@ -111,11 +111,11 @@ static enum input_source istream_source(const unsigned char *sha1,
 	unsigned long size;
 	int status;
 
+	oi->typep = type;
 	oi->sizep = &size;
 	status = sha1_object_info_extended(sha1, oi);
 	if (status < 0)
 		return stream_error;
-	*type = status;
 
 	switch (oi->whence) {
 	case OI_LOOSE:
@@ -135,7 +135,7 @@ struct git_istream *open_istream(const unsigned char *sha1,
 				 struct stream_filter *filter)
 {
 	struct git_istream *st;
-	struct object_info oi;
+	struct object_info oi = {NULL};
 	const unsigned char *real = lookup_replace_object(sha1);
 	enum input_source src = istream_source(real, type, &oi);
 
@@ -149,7 +149,7 @@ struct git_istream *open_istream(const unsigned char *sha1,
 			return NULL;
 		}
 	}
-	if (st && filter) {
+	if (filter) {
 		/* Add "&& !is_null_stream_filter(filter)" for performance */
 		struct git_istream *nst = attach_stream_filter(st, filter);
 		if (!nst)
@@ -237,7 +237,7 @@ static read_method_decl(filtered)
 		if (!fs->input_finished) {
 			fs->i_end = read_istream(fs->upstream, fs->ibuf, FILTER_BUFFER);
 			if (fs->i_end < 0)
-				break;
+				return -1;
 			if (fs->i_end)
 				continue;
 		}
@@ -309,7 +309,7 @@ static read_method_decl(loose)
 			st->z_state = z_done;
 			break;
 		}
-		if (status != Z_OK && status != Z_BUF_ERROR) {
+		if (status != Z_OK && (status != Z_BUF_ERROR || total_read < sz)) {
 			git_inflate_end(&st->z);
 			st->z_state = z_error;
 			return -1;
@@ -514,6 +514,8 @@ int stream_blob_to_fd(int fd, unsigned const char *sha1, struct stream_filter *f
 		ssize_t wrote, holeto;
 		ssize_t readlen = read_istream(st, buf, sizeof(buf));
 
+		if (readlen < 0)
+			goto close_and_exit;
 		if (!readlen)
 			break;
 		if (can_seek && sizeof(buf) == readlen) {

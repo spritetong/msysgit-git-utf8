@@ -91,6 +91,10 @@ q_to_tab () {
 	tr Q '\011'
 }
 
+qz_to_tab_space () {
+	tr QZ '\011\040'
+}
+
 append_cr () {
 	sed -e 's/$/Q/' | tr Q '\015'
 }
@@ -135,20 +139,40 @@ test_pause () {
 	fi
 }
 
-# Call test_commit with the arguments "<message> [<file> [<contents>]]"
+# Call test_commit with the arguments "<message> [<file> [<contents> [<tag>]]]"
 #
 # This will commit a file with the given contents and the given commit
-# message.  It will also add a tag with <message> as name.
+# message, and tag the resulting commit with the given tag name.
 #
-# Both <file> and <contents> default to <message>.
+# <file>, <contents>, and <tag> all default to <message>.
 
 test_commit () {
-	file=${2:-"$1.t"}
+	notick= &&
+	signoff= &&
+	while test $# != 0
+	do
+		case "$1" in
+		--notick)
+			notick=yes
+			;;
+		--signoff)
+			signoff="$1"
+			;;
+		*)
+			break
+			;;
+		esac
+		shift
+	done &&
+	file=${2:-"$1.t"} &&
 	echo "${3-$1}" > "$file" &&
 	git add "$file" &&
-	test_tick &&
-	git commit -m "$1" &&
-	git tag "$1"
+	if test -z "$notick"
+	then
+		test_tick
+	fi &&
+	git commit $signoff -m "$1" &&
+	git tag "${4:-$1}"
 }
 
 # Call test_merge with the arguments "<message> <commit>", where <commit>
@@ -212,9 +236,35 @@ write_script () {
 # capital letters by convention).
 
 test_set_prereq () {
-	satisfied="$satisfied$1 "
+	satisfied_prereq="$satisfied_prereq$1 "
 }
-satisfied=" "
+satisfied_prereq=" "
+lazily_testable_prereq= lazily_tested_prereq=
+
+# Usage: test_lazy_prereq PREREQ 'script'
+test_lazy_prereq () {
+	lazily_testable_prereq="$lazily_testable_prereq$1 "
+	eval test_prereq_lazily_$1=\$2
+}
+
+test_run_lazy_prereq_ () {
+	script='
+mkdir -p "$TRASH_DIRECTORY/prereq-test-dir" &&
+(
+	cd "$TRASH_DIRECTORY/prereq-test-dir" &&'"$2"'
+)'
+	say >&3 "checking prerequisite: $1"
+	say >&3 "$script"
+	test_eval_ "$script"
+	eval_ret=$?
+	rm -rf "$TRASH_DIRECTORY/prereq-test-dir"
+	if test "$eval_ret" = 0; then
+		say >&3 "prerequisite $1 ok"
+	else
+		say >&3 "prerequisite $1 not satisfied"
+	fi
+	return $eval_ret
+}
 
 test_have_prereq () {
 	# prerequisites can be concatenated with ','
@@ -229,13 +279,48 @@ test_have_prereq () {
 
 	for prerequisite
 	do
-		total_prereq=$(($total_prereq + 1))
-		case $satisfied in
+		case "$prerequisite" in
+		!*)
+			negative_prereq=t
+			prerequisite=${prerequisite#!}
+			;;
+		*)
+			negative_prereq=
+		esac
+
+		case " $lazily_tested_prereq " in
 		*" $prerequisite "*)
+			;;
+		*)
+			case " $lazily_testable_prereq " in
+			*" $prerequisite "*)
+				eval "script=\$test_prereq_lazily_$prerequisite" &&
+				if test_run_lazy_prereq_ "$prerequisite" "$script"
+				then
+					test_set_prereq $prerequisite
+				fi
+				lazily_tested_prereq="$lazily_tested_prereq$prerequisite "
+			esac
+			;;
+		esac
+
+		total_prereq=$(($total_prereq + 1))
+		case "$satisfied_prereq" in
+		*" $prerequisite "*)
+			satisfied_this_prereq=t
+			;;
+		*)
+			satisfied_this_prereq=
+		esac
+
+		case "$satisfied_this_prereq,$negative_prereq" in
+		t,|,t)
 			ok_prereq=$(($ok_prereq + 1))
 			;;
 		*)
-			# Keep a list of missing prerequisites
+			# Keep a list of missing prerequisites; restore
+			# the negative marker if necessary.
+			prerequisite=${negative_prereq:+!}$prerequisite
 			if test -z "$missing_prereq"
 			then
 				missing_prereq=$prerequisite
@@ -258,6 +343,7 @@ test_declared_prereq () {
 }
 
 test_expect_failure () {
+	test_start_
 	test "$#" = 3 && { test_prereq=$1; shift; } || test_prereq=
 	test "$#" = 2 ||
 	error "bug in the test script: not 2 or 3 parameters to test-expect-failure"
@@ -272,10 +358,11 @@ test_expect_failure () {
 			test_known_broken_failure_ "$1"
 		fi
 	fi
-	echo >&3 ""
+	test_finish_
 }
 
 test_expect_success () {
+	test_start_
 	test "$#" = 3 && { test_prereq=$1; shift; } || test_prereq=
 	test "$#" = 2 ||
 	error "bug in the test script: not 2 or 3 parameters to test-expect-success"
@@ -290,7 +377,7 @@ test_expect_success () {
 			test_failure_ "$@"
 		fi
 	fi
-	echo >&3 ""
+	test_finish_
 }
 
 # test_external runs external test scripts that provide continuous
@@ -455,6 +542,9 @@ test_must_fail () {
 	elif test $exit_code = 127; then
 		echo >&2 "test_must_fail: command not found: $*"
 		return 1
+	elif test $exit_code = 126; then
+		echo >&2 "test_must_fail: valgrind error: $*"
+		return 1
 	fi
 	return 0
 }
@@ -521,6 +611,46 @@ test_cmp() {
 	$GIT_TEST_CMP "$@"
 }
 
+# Check if the file expected to be empty is indeed empty, and barfs
+# otherwise.
+
+test_must_be_empty () {
+	if test -s "$1"
+	then
+		echo "'$1' is not empty, it contains:"
+		cat "$1"
+		return 1
+	fi
+}
+
+# Tests that its two parameters refer to the same revision
+test_cmp_rev () {
+	git rev-parse --verify "$1" >expect.rev &&
+	git rev-parse --verify "$2" >actual.rev &&
+	test_cmp expect.rev actual.rev
+}
+
+# Print a sequence of numbers or letters in increasing order.  This is
+# similar to GNU seq(1), but the latter might not be available
+# everywhere (and does not do letters).  It may be used like:
+#
+#	for i in `test_seq 100`; do
+#		for j in `test_seq 10 20`; do
+#			for k in `test_seq a z`; do
+#				echo $i-$j-$k
+#			done
+#		done
+#	done
+
+test_seq () {
+	case $# in
+	1)	set 1 "$@" ;;
+	2)	;;
+	*)	error "bug in the test script: not 1 or 2 parameters to test_seq" ;;
+	esac
+	perl -le 'print for $ARGV[0]..$ARGV[1]' -- "$@"
+}
+
 # This function can be used to schedule some commands to be run
 # unconditionally at the end of the test to restore sanity:
 #
@@ -562,4 +692,91 @@ test_create_repo () {
 		error "cannot run git init -- have you built things yet?"
 		mv .git/hooks .git/hooks-disabled
 	) || exit
+}
+
+# This function helps on symlink challenged file systems when it is not
+# important that the file system entry is a symbolic link.
+# Use test_ln_s_add instead of "ln -s x y && git add y" to add a
+# symbolic link entry y to the index.
+
+test_ln_s_add () {
+	if test_have_prereq SYMLINKS
+	then
+		ln -s "$1" "$2" &&
+		git update-index --add "$2"
+	else
+		printf '%s' "$1" >"$2" &&
+		ln_s_obj=$(git hash-object -w "$2") &&
+		git update-index --add --cacheinfo 120000 $ln_s_obj "$2"
+	fi
+}
+
+perl () {
+	command "$PERL_PATH" "$@"
+}
+
+# The following mingw_* functions obey POSIX shell syntax, but are actually
+# bash scripts, and are meant to be used only with bash on Windows.
+
+# A test_cmp function that treats LF and CRLF equal and avoids to fork
+# diff when possible.
+mingw_test_cmp () {
+	# Read text into shell variables and compare them. If the results
+	# are different, use regular diff to report the difference.
+	local test_cmp_a= test_cmp_b=
+
+	# When text came from stdin (one argument is '-') we must feed it
+	# to diff.
+	local stdin_for_diff=
+
+	# Since it is difficult to detect the difference between an
+	# empty input file and a failure to read the files, we go straight
+	# to diff if one of the inputs is empty.
+	if test -s "$1" && test -s "$2"
+	then
+		# regular case: both files non-empty
+		mingw_read_file_strip_cr_ test_cmp_a <"$1"
+		mingw_read_file_strip_cr_ test_cmp_b <"$2"
+	elif test -s "$1" && test "$2" = -
+	then
+		# read 2nd file from stdin
+		mingw_read_file_strip_cr_ test_cmp_a <"$1"
+		mingw_read_file_strip_cr_ test_cmp_b
+		stdin_for_diff='<<<"$test_cmp_b"'
+	elif test "$1" = - && test -s "$2"
+	then
+		# read 1st file from stdin
+		mingw_read_file_strip_cr_ test_cmp_a
+		mingw_read_file_strip_cr_ test_cmp_b <"$2"
+		stdin_for_diff='<<<"$test_cmp_a"'
+	fi
+	test -n "$test_cmp_a" &&
+	test -n "$test_cmp_b" &&
+	test "$test_cmp_a" = "$test_cmp_b" ||
+	eval "diff -u \"\$@\" $stdin_for_diff"
+}
+
+# $1 is the name of the shell variable to fill in
+mingw_read_file_strip_cr_ () {
+	# Read line-wise using LF as the line separator
+	# and use IFS to strip CR.
+	local line
+	while :
+	do
+		if IFS=$'\r' read -r -d $'\n' line
+		then
+			# good
+			line=$line$'\n'
+		else
+			# we get here at EOF, but also if the last line
+			# was not terminated by LF; in the latter case,
+			# some text was read
+			if test -z "$line"
+			then
+				# EOF, really
+				break
+			fi
+		fi
+		eval "$1=\$$1\$line"
+	done
 }

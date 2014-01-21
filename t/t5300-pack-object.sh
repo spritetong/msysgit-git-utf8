@@ -151,7 +151,7 @@ test_expect_success \
 	    git cat-file $t $object || return 1
 	 done <obj-list
     } >current &&
-    test_cmp expect current'
+    cmp expect current'
 
 test_expect_success \
     'use packed deltified (REF_DELTA) objects' \
@@ -166,7 +166,7 @@ test_expect_success \
 	    git cat-file $t $object || return 1
 	 done <obj-list
     } >current &&
-    test_cmp expect current'
+    cmp expect current'
 
 test_expect_success \
     'use packed deltified (OFS_DELTA) objects' \
@@ -181,7 +181,7 @@ test_expect_success \
 	    git cat-file $t $object || return 1
 	 done <obj-list
     } >current &&
-    test_cmp expect current'
+    cmp expect current'
 
 unset GIT_OBJECT_DIRECTORY
 
@@ -195,9 +195,9 @@ test_expect_success 'survive missing objects/pack directory' '
 		rm -fr $GOP &&
 		git index-pack --stdin --keep=test <../test-3-${packname_3}.pack &&
 		test -f $GOP/pack-${packname_3}.pack &&
-		test_cmp $GOP/pack-${packname_3}.pack ../test-3-${packname_3}.pack &&
+		cmp $GOP/pack-${packname_3}.pack ../test-3-${packname_3}.pack &&
 		test -f $GOP/pack-${packname_3}.idx &&
-		test_cmp $GOP/pack-${packname_3}.idx ../test-3-${packname_3}.idx &&
+		cmp $GOP/pack-${packname_3}.idx ../test-3-${packname_3}.idx &&
 		test -f $GOP/pack-${packname_3}.keep
 	)
 '
@@ -416,6 +416,11 @@ test_expect_success \
 test_expect_success \
     'make sure index-pack detects the SHA1 collision' \
     'test_must_fail git index-pack -o bad.idx test-3.pack 2>msg &&
-     grep "SHA1 COLLISION FOUND" msg'
+     test_i18ngrep "SHA1 COLLISION FOUND" msg'
+
+test_expect_success \
+    'make sure index-pack detects the SHA1 collision (large blobs)' \
+    'test_must_fail git -c core.bigfilethreshold=1 index-pack -o bad.idx test-3.pack 2>msg &&
+     test_i18ngrep "SHA1 COLLISION FOUND" msg'
 
 test_done

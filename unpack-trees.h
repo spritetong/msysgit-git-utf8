@@ -8,7 +8,7 @@
 struct unpack_trees_options;
 struct exclude_list;
 
-typedef int (*merge_fn_t)(struct cache_entry **src,
+typedef int (*merge_fn_t)(const struct cache_entry * const *src,
 		struct unpack_trees_options *options);
 
 enum unpack_trees_error_types {
@@ -52,7 +52,6 @@ struct unpack_trees_options {
 	const char *prefix;
 	int cache_bottom;
 	struct dir_struct *dir;
-	struct path_exclude_check *path_exclude_check;
 	struct pathspec *pathspec;
 	merge_fn_t fn;
 	const char *msgs[NB_UNPACK_TREES_ERROR_TYPES];
@@ -78,9 +77,13 @@ struct unpack_trees_options {
 extern int unpack_trees(unsigned n, struct tree_desc *t,
 		struct unpack_trees_options *options);
 
-int threeway_merge(struct cache_entry **stages, struct unpack_trees_options *o);
-int twoway_merge(struct cache_entry **src, struct unpack_trees_options *o);
-int bind_merge(struct cache_entry **src, struct unpack_trees_options *o);
-int oneway_merge(struct cache_entry **src, struct unpack_trees_options *o);
+int threeway_merge(const struct cache_entry * const *stages,
+		   struct unpack_trees_options *o);
+int twoway_merge(const struct cache_entry * const *src,
+		 struct unpack_trees_options *o);
+int bind_merge(const struct cache_entry * const *src,
+	       struct unpack_trees_options *o);
+int oneway_merge(const struct cache_entry * const *src,
+		 struct unpack_trees_options *o);
 
 #endif
